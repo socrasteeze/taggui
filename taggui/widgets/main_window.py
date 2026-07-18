@@ -277,7 +277,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def show_bucket_calculator_dialog(self):
         bucket_calculator_dialog = BucketCalculatorDialog(
-            parent=self, image_list_model=self.image_list_model)
+            parent=self, image_list_model=self.image_list_model,
+            directory_path=self.directory_path)
         bucket_calculator_dialog.exec()
 
     @Slot()
