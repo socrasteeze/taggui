@@ -9,6 +9,12 @@ set "VENV_DIR=venv"
 set "PYTHON=python"
 set "FRESH=0"
 
+REM Keep the Hugging Face model cache on the C: drive (an SSD). This is the
+REM standard location under the user profile; models download here once and
+REM are reused. Scoped to this script by setlocal, so the global environment
+REM is left unchanged.
+set "HF_HOME=%USERPROFILE%\.cache\huggingface"
+
 if not exist "%VENV_DIR%\Scripts\activate.bat" (
     echo Creating virtual environment in "%VENV_DIR%"...
     %PYTHON% -m venv "%VENV_DIR%"
