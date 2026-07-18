@@ -108,6 +108,25 @@ def assign_bucket(dimensions: tuple[int, int],
                             is_upscaled=is_upscaled)
 
 
+def plan_resize_crop(source_size: tuple[int, int], bucket: tuple[int, int]
+                     ) -> tuple[tuple[int, int], tuple[int, int, int, int]]:
+    """
+    Given a source image size and a target bucket, return the intermediate
+    resize size and the center-crop box (left, top, right, bottom) that turns
+    the source into exactly the bucket resolution, matching kohya's cover-then-
+    center-crop behavior.
+    """
+    width, height = source_size
+    bucket_width, bucket_height = bucket
+    scale = max(bucket_width / width, bucket_height / height)
+    scaled_width = round(width * scale)
+    scaled_height = round(height * scale)
+    left = max(0, (scaled_width - bucket_width) // 2)
+    top = max(0, (scaled_height - bucket_height) // 2)
+    crop_box = (left, top, left + bucket_width, top + bucket_height)
+    return (scaled_width, scaled_height), crop_box
+
+
 def bucket_distribution(image_dimensions: list[tuple[int, int]],
                         config: BucketConfig
                         ) -> dict[tuple[int, int], int]:

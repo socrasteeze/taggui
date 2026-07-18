@@ -24,10 +24,17 @@ WD Tagger v2/v3, LLaVA-era VLMs, BLIP-2/InstructBLIP/Kosmos-2.
   verified equal to a full recount across edit/clear/batch/no-op cases.
 - ✅ Thumbnail decode (3.4) — thumbnails are downsampled during decode via
   `QImageReader.setScaledSize` instead of decoding at full resolution.
-- ✅ Aspect-ratio bucket calculator (4) — new `utils/bucketing.py` (kohya-
-  compatible, unit-tested: 1920×1080 → 1344×768 at 1024 area) plus a
-  Tools ▸ *Aspect Ratio Bucket Calculator* dialog showing the bucket
-  distribution and upscale/heavy-crop/sparse-bucket warnings.
+- ✅ Aspect-ratio bucket calculator **and processor** (4) — new
+  `utils/bucketing.py` (kohya-compatible, unit-tested: 1920×1080 → 1344×768 at
+  1024 area) plus a Tools ▸ *Aspect Ratio Bucket Calculator* dialog showing the
+  bucket distribution and upscale/heavy-crop/sparse-bucket warnings. The
+  *Process Images into Buckets* button moves every original into an
+  `original_images` backup folder (preserving subfolder structure) and writes
+  a resized + center-cropped PNG in its place, on a background thread with a
+  progress bar. Directory loading now skips `original_images/` so backups are
+  never reloaded or re-processed. End-to-end tested on real files including
+  subfolders, transparency flattening, and `foo.jpg`/`foo.png` name-collision
+  disambiguation with caption copying.
 
 **Deferred (need a GUI run and/or multi-GB model downloads to verify safely):**
 - WD tagger input batching (3.3) — requires restructuring the per-image

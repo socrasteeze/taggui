@@ -22,16 +22,20 @@ from utils.utils import get_confirmation_dialog_reply, pluralize
 UNDO_STACK_SIZE = 32
 
 
+BACKUP_DIRECTORY_NAME = 'original_images'
+
+
 def get_file_paths(directory_path: Path) -> set[Path]:
     """
     Recursively get all file paths in a directory, including those in
-    subdirectories.
+    subdirectories. The `original_images` backup directory created by the
+    bucket processor is skipped so that backed-up originals are not reloaded.
     """
     file_paths = set()
     for path in directory_path.iterdir():
         if path.is_file():
             file_paths.add(path)
-        elif path.is_dir():
+        elif path.is_dir() and path.name != BACKUP_DIRECTORY_NAME:
             file_paths.update(get_file_paths(path))
     return file_paths
 
