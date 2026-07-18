@@ -15,6 +15,10 @@ class TagCounterModel(QAbstractListModel):
         self.tag_counter = Counter()
         self.most_common_tags = []
         self.all_tags_list = None
+        # A snapshot of the tags last counted for each image, keyed by path, so
+        # that edits can be applied incrementally instead of recounting every
+        # image on every change.
+        self.counted_tags = {}
 
     def rowCount(self, parent=None) -> int:
         return len(self.most_common_tags)
@@ -68,8 +72,37 @@ class TagCounterModel(QAbstractListModel):
 
     @Slot()
     def count_tags(self, images: list[Image]):
-        self.tag_counter.clear()
+        """Recount every tag from scratch (used on directory load / reset)."""
+        self.tag_counter = Counter()
+        self.counted_tags = {}
         for image in images:
             self.tag_counter.update(image.tags)
+            self.counted_tags[image.path] = list(image.tags)
+        self.most_common_tags = self.tag_counter.most_common()
+        self.modelReset.emit()
+
+    def update_tag_counts(self, images: list[Image], first_row: int,
+                          last_row: int):
+        """
+        Incrementally update the tag counts for the images in the given row
+        range, applying only the difference between each image's previous and
+        current tags. This avoids an O(dataset) recount on every edit.
+        """
+        changed = False
+        for row in range(first_row, min(last_row, len(images) - 1) + 1):
+            image = images[row]
+            old_tags = self.counted_tags.get(image.path, [])
+            new_tags = image.tags
+            if old_tags == new_tags:
+                continue
+            changed = True
+            if old_tags:
+                self.tag_counter.subtract(old_tags)
+            self.tag_counter.update(new_tags)
+            self.counted_tags[image.path] = list(new_tags)
+        if not changed:
+            return
+        # `+ Counter()` drops tags whose count fell to zero or below.
+        self.tag_counter = +self.tag_counter
         self.most_common_tags = self.tag_counter.most_common()
         self.modelReset.emit()

@@ -1,7 +1,9 @@
+import os
 import random
 import re
 import sys
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -82,9 +84,22 @@ class ImageListModel(QAbstractListModel):
             image_reader = QImageReader(str(image.path))
             # Rotate the image based on the orientation tag.
             image_reader.setAutoTransform(True)
-            pixmap = QPixmap.fromImageReader(image_reader).scaledToWidth(
-                self.image_list_image_width,
-                Qt.TransformationMode.SmoothTransformation)
+            # Downsample while decoding instead of decoding the full-resolution
+            # image and scaling afterwards. This greatly reduces the CPU and
+            # memory cost of generating thumbnails for large images.
+            source_size = image_reader.size()
+            if source_size.isValid() and source_size.width() > 0:
+                scaled_height = round(self.image_list_image_width
+                                      * source_size.height()
+                                      / source_size.width())
+                image_reader.setScaledSize(
+                    QSize(self.image_list_image_width, max(scaled_height, 1)))
+            pixmap = QPixmap.fromImageReader(image_reader)
+            # Correct the width in case an Exif rotation swapped the dimensions.
+            if pixmap.width() != self.image_list_image_width:
+                pixmap = pixmap.scaledToWidth(
+                    self.image_list_image_width,
+                    Qt.TransformationMode.SmoothTransformation)
             thumbnail = QIcon(pixmap)
             image.thumbnail = thumbnail
             return thumbnail
@@ -122,44 +137,54 @@ class ImageListModel(QAbstractListModel):
         # strings.
         text_file_path_strings = {str(path) for path in file_paths
                                   if path.suffix == '.txt'}
-        for image_path in image_paths:
-            try:
-                dimensions = imagesize.get(image_path)
-                # Check the Exif orientation tag and rotate the dimensions if
-                # necessary.
-                with open(image_path, 'rb') as image_file:
-                    try:
-                        exif_tags = exifread.process_file(
-                            image_file, details=False,
-                            stop_tag='Image Orientation')
-                        if 'Image Orientation' in exif_tags:
-                            orientations = (exif_tags['Image Orientation']
-                                            .values)
-                            if any(value in orientations
-                                   for value in (5, 6, 7, 8)):
-                                dimensions = (dimensions[1], dimensions[0])
-                    except Exception as exception:
-                        print(f'Failed to get Exif tags for {image_path}: '
-                              f'{exception}', file=sys.stderr)
-            except (ValueError, OSError) as exception:
-                print(f'Failed to get dimensions for {image_path}: '
-                      f'{exception}', file=sys.stderr)
-                dimensions = None
-            tags = []
-            text_file_path = image_path.with_suffix('.txt')
-            if str(text_file_path) in text_file_path_strings:
-                # `errors='replace'` inserts a replacement marker such as '?'
-                # when there is malformed data.
-                caption = text_file_path.read_text(encoding='utf-8',
-                                                   errors='replace')
-                if caption:
-                    tags = caption.split(self.tag_separator)
-                    tags = [tag.strip() for tag in tags]
-                    tags = [tag for tag in tags if tag]
-            image = Image(image_path, dimensions, tags)
-            self.images.append(image)
+        # Reading each image's dimensions, Exif orientation, and caption file is
+        # I/O-bound, so process the images in parallel. This is much faster than
+        # a sequential loop on large datasets, especially over a network drive.
+        max_workers = min(32, (os.cpu_count() or 4) * 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            self.images = list(executor.map(
+                lambda image_path: self._load_image(image_path,
+                                                    text_file_path_strings),
+                image_paths))
         self.images.sort(key=lambda image_: image_.path)
         self.modelReset.emit()
+
+    def _load_image(self, image_path: Path,
+                    text_file_path_strings: set[str]) -> Image:
+        """Read a single image's dimensions, orientation, and caption tags."""
+        try:
+            dimensions = imagesize.get(image_path)
+            # Check the Exif orientation tag and rotate the dimensions if
+            # necessary.
+            with open(image_path, 'rb') as image_file:
+                try:
+                    exif_tags = exifread.process_file(
+                        image_file, details=False,
+                        stop_tag='Image Orientation')
+                    if 'Image Orientation' in exif_tags:
+                        orientations = exif_tags['Image Orientation'].values
+                        if any(value in orientations
+                               for value in (5, 6, 7, 8)):
+                            dimensions = (dimensions[1], dimensions[0])
+                except Exception as exception:
+                    print(f'Failed to get Exif tags for {image_path}: '
+                          f'{exception}', file=sys.stderr)
+        except (ValueError, OSError) as exception:
+            print(f'Failed to get dimensions for {image_path}: '
+                  f'{exception}', file=sys.stderr)
+            dimensions = None
+        tags = []
+        text_file_path = image_path.with_suffix('.txt')
+        if str(text_file_path) in text_file_path_strings:
+            # `errors='replace'` inserts a replacement marker such as '?'
+            # when there is malformed data.
+            caption = text_file_path.read_text(encoding='utf-8',
+                                               errors='replace')
+            if caption:
+                tags = caption.split(self.tag_separator)
+                tags = [tag.strip() for tag in tags]
+                tags = [tag for tag in tags if tag]
+        return Image(image_path, dimensions, tags)
 
     def add_to_undo_stack(self, action_name: str,
                           should_ask_for_confirmation: bool):

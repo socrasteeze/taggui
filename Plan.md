@@ -11,6 +11,36 @@ WD Tagger v2/v3, LLaVA-era VLMs, BLIP-2/InstructBLIP/Kosmos-2.
 
 ---
 
+## Implementation status
+
+**Done (first pass — pure-code optimizations + bucket calculator):**
+- ✅ WD tagger GPU inference (3.1) — `wd_tagger.py` now selects CUDA/DirectML
+  ONNX providers based on the chosen device, falling back to CPU cleanly when
+  `onnxruntime-gpu` isn't installed.
+- ✅ Parallel directory loading (3.2) — `image_list_model.load_directory`
+  reads dimensions/Exif/captions across a thread pool.
+- ✅ Incremental tag counter (3.4) — `TagCounterModel.update_tag_counts`
+  re-diffs only the changed rows instead of recounting every image per edit;
+  verified equal to a full recount across edit/clear/batch/no-op cases.
+- ✅ Thumbnail decode (3.4) — thumbnails are downsampled during decode via
+  `QImageReader.setScaledSize` instead of decoding at full resolution.
+- ✅ Aspect-ratio bucket calculator (4) — new `utils/bucketing.py` (kohya-
+  compatible, unit-tested: 1920×1080 → 1344×768 at 1024 area) plus a
+  Tools ▸ *Aspect Ratio Bucket Calculator* dialog showing the bucket
+  distribution and upscale/heavy-crop/sparse-bucket warnings.
+
+**Deferred (need a GUI run and/or multi-GB model downloads to verify safely):**
+- WD tagger input batching (3.3) — requires restructuring the per-image
+  captioning loop; the GPU-provider win above is the larger one.
+- Undo-stack per-image diffs (3.4) — touches ~12 mutation methods; needs
+  interactive undo/redo testing before landing.
+- Qwen3-VL / Gemma 4 model additions + transformers bump (2.1, 3.5) — gated
+  on downloading the models and re-verifying every existing captioner.
+- Caption profiles / per-encoder token counter, trigger tooling, JoyCaption
+  tag-grounding, remaining UI debounces (1.x, 3.4 tail).
+
+---
+
 ## 1. Per-target-model caption alignment
 
 The single biggest gap: TagGUI treats all captions identically, but the four
