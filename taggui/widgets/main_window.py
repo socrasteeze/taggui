@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
 from transformers import AutoTokenizer
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
+from dialogs.bucket_calculator_dialog import BucketCalculatorDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from models.image_list_model import ImageListModel
@@ -274,6 +275,12 @@ class MainWindow(QMainWindow):
         batch_reorder_tags_dialog.exec()
 
     @Slot()
+    def show_bucket_calculator_dialog(self):
+        bucket_calculator_dialog = BucketCalculatorDialog(
+            parent=self, image_list_model=self.image_list_model)
+        bucket_calculator_dialog.exec()
+
+    @Slot()
     def remove_duplicate_tags(self):
         removed_tag_count = self.image_list_model.remove_duplicate_tags()
         message_box = QMessageBox()
@@ -353,6 +360,13 @@ class MainWindow(QMainWindow):
         remove_empty_tags_action.triggered.connect(
             self.remove_empty_tags)
         edit_menu.addAction(remove_empty_tags_action)
+
+        tools_menu = menu_bar.addMenu('Tools')
+        bucket_calculator_action = QAction('Aspect Ratio Bucket Calculator...',
+                                           parent=self)
+        bucket_calculator_action.triggered.connect(
+            self.show_bucket_calculator_dialog)
+        tools_menu.addAction(bucket_calculator_action)
 
         view_menu = menu_bar.addMenu('View')
         self.toggle_image_list_action.setCheckable(True)
@@ -440,8 +454,10 @@ class MainWindow(QMainWindow):
             lambda: self.tag_counter_model.count_tags(
                 self.image_list_model.images))
         self.image_list_model.dataChanged.connect(
-            lambda: self.tag_counter_model.count_tags(
-                self.image_list_model.images))
+            lambda top_left, bottom_right, _roles=None:
+            self.tag_counter_model.update_tag_counts(
+                self.image_list_model.images, top_left.row(),
+                bottom_right.row()))
         self.image_list_model.dataChanged.connect(
             self.image_tags_editor.reload_image_tags_if_changed)
         self.image_list_model.update_undo_and_redo_actions_requested.connect(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import huggingface_hub
 import numpy as np
+import onnxruntime
 from PIL import Image as PilImage
 from onnxruntime import InferenceSession
 
@@ -19,6 +20,26 @@ KAOMOJIS = ['0_0', '(o)_(o)', '+_+', '+_-', '._.', '<o>_<o>', '<|>_<|>', '=_=',
             '|_|', '||_||']
 
 
+def get_onnx_providers(use_gpu: bool, gpu_index: int = 0) -> list:
+    """
+    Build the ONNX Runtime execution provider list, preferring GPU providers
+    when the user selected the GPU and the corresponding provider is actually
+    installed (e.g. onnxruntime-gpu or onnxruntime-directml). Falls back to CPU
+    otherwise, so this is safe even with the CPU-only onnxruntime package.
+    """
+    available = onnxruntime.get_available_providers()
+    providers = []
+    if use_gpu:
+        if 'CUDAExecutionProvider' in available:
+            providers.append(('CUDAExecutionProvider',
+                              {'device_id': gpu_index}))
+        elif 'DmlExecutionProvider' in available:
+            providers.append(('DmlExecutionProvider',
+                              {'device_id': gpu_index}))
+    providers.append('CPUExecutionProvider')
+    return providers
+
+
 def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
     if not tags_to_exclude_string.strip():
         return []
@@ -28,7 +49,7 @@ def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
 
 
 class WdTaggerModel:
-    def __init__(self, model_id: str):
+    def __init__(self, model_id: str, providers: list | None = None):
         model_path = Path(model_id) / 'model.onnx'
         if not model_path.is_file():
             model_path = huggingface_hub.hf_hub_download(model_id,
@@ -37,7 +58,10 @@ class WdTaggerModel:
         if not tags_path.is_file():
             tags_path = huggingface_hub.hf_hub_download(
                 model_id, filename='selected_tags.csv')
-        self.inference_session = InferenceSession(model_path)
+        if providers is None:
+            providers = ['CPUExecutionProvider']
+        self.inference_session = InferenceSession(str(model_path),
+                                                  providers=providers)
         self.tags = []
         self.rating_tags_indices = []
         self.general_tags_indices = []
@@ -106,7 +130,10 @@ class WdTagger(AutoCaptioningModel):
         return None
 
     def get_model(self):
-        return WdTaggerModel(self.model_id)
+        use_gpu = self.device.type == 'cuda'
+        gpu_index = self.device.index or 0
+        providers = get_onnx_providers(use_gpu=use_gpu, gpu_index=gpu_index)
+        return WdTaggerModel(self.model_id, providers=providers)
 
     def get_captioning_message(self, are_multiple_images_selected: bool,
                                captioning_start_datetime: datetime) -> str:
