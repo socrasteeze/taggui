@@ -114,7 +114,43 @@ calling `imagesize.get()` plus an `exifread` file-open per image. On a
   Gemma 4, where it's effectively required on consumer GPUs (30B-A3B ≈ 20 GB,
   Gemma 4 31B ≈ 18–20 GB at 4-bit).
 
-### 3.4 Dependency refresh
+### 3.4 UI responsiveness on large datasets
+Findings from a code-level pass, ranked by impact:
+
+- **Tag counter is O(dataset) per edit** — `main_window.py:442-444` reruns
+  `count_tags()` over *all* images on every `dataChanged`, and batch
+  captioning emits `dataChanged` per image, making an M-image captioning run
+  over an N-image folder O(M·N). Make `TagCounterModel` incremental
+  (`counter.subtract(old); counter.update(new)`).
+- **Undo stack deep-copies the whole dataset per edit** —
+  `image_list_model.py:167` snapshots every image's tags (32 deep) even for a
+  single-tag change. Store per-image diffs instead.
+- **Thumbnails decode full-resolution images on the UI thread** —
+  `image_list_model.py:82-88` decodes full-size then downscales inside
+  `data()`. Use `QImageReader.setScaledSize()` (downsample during decode) and
+  move generation to a background pool.
+- **`tokens:` filter tokenizes every image per keystroke** —
+  `proxy_image_list_model.py:62-65` with no caching; also the filter
+  re-joins each image's tags multiple times per evaluation. Cache token
+  counts per image (invalidate on tag change), debounce the filter box, and
+  compute the joined caption once per image per pass.
+- **Batch operations write .txt files synchronously on the UI thread** —
+  sort/shuffle/find-replace/rename all call `write_image_tags_to_disk`
+  per image inline; some paths write even when nothing changed. Move writes
+  to a worker, skip unchanged files.
+- **Find & Replace recounts all matches on every keystroke**
+  (`find_and_replace_dialog.py:42`) — debounce with a short QTimer.
+- **Image viewer re-decodes the file from disk on every resize event**
+  (`image_viewer.py:21-24`) — cache the decoded QImage, rescale the cache;
+  reload only on path change.
+- **Captioning loop is strictly serial** (`captioning_thread.py:101-126`) —
+  the GPU idles during each image's disk load + preprocess. Prefetch the next
+  image's inputs while the current one generates (also covers 3.3 batching).
+- **Startup blocks on the CLIP tokenizer** (`main_window.py:49-50`) —
+  `AutoTokenizer.from_pretrained` runs in the constructor before first paint.
+  Load lazily or after show.
+
+### 3.5 Dependency refresh
 - `transformers==4.48.3` (early 2025) is too old for Qwen3-VL — bump to a
   current 4.5x release and re-verify each existing captioner (Florence-2 is
   the usual breakage point; pin `trust_remote_code` versions).
@@ -126,8 +162,24 @@ calling `imagesize.get()` plus an `exifread` file-open per image. On a
   supported); add optional JSONL export (`{"file_name": ..., "text": ...}`)
   for HF `datasets`/diffusers Dreambooth scripts used by FLUX.2 Klein
   training examples.
-- **Resolution audit**: filterable warning for images under the target
-  bucket area (1024² for SDXL/Illustrious/FLUX; Klein wants ≥1024 long edge).
+- **Aspect-ratio bucket calculator** (new): replicate the kohya/OneTrainer
+  bucketing algorithm so users can see how their dataset will bucket *before*
+  training:
+  - Inputs: target resolution area (default 1024², plus 512²/1536² presets),
+    bucket step (64 px, kohya `--bucket_reso_steps`), min/max resolution
+    (256–2048 defaults, kohya `--min_bucket_reso`/`--max_bucket_reso`), and
+    an upscaling toggle (`--bucket_no_upscale` equivalent).
+  - Per image: compute the assigned bucket (nearest aspect ratio at the
+    target area, dimensions snapped to the step) and the resulting
+    resize/crop, exactly as kohya's `make_bucket_resolutions` does.
+  - Dataset view: bucket distribution table (bucket → image count) so users
+    can spot lonely buckets (batch-of-1 buckets hurt training) and
+    over-cropped images.
+  - Filters/warnings: `bucket:WxH` filter term; flag images that would be
+    upscaled (source below bucket size), cropped more than a threshold %, or
+    below the target area entirely (Klein wants ≥1024 long edge).
+  - Sidecar-free: purely a calculator/report — no image modification —
+    matching what kohya and OneTrainer will do at train time.
 - **Caption stats panel**: distribution of token counts per active encoder,
   % images containing the trigger token, tag frequency (exists) — helps spot
   over/under-captioning before training.
@@ -137,11 +189,16 @@ calling `imagesize.get()` plus an `exifread` file-open per image. On a
 1. WD tagger GPU + batching (3.1) — small diff, immediate payoff.
 2. Parallel directory loading (3.2).
 3. Caption profiles + per-encoder token counter (1.1, 1.2).
-4. Qwen3-VL (incl. 30B-A3B) + Gemma 4 + transformers bump (2.1, 3.4) — do
+4. Incremental tag counter + undo diffs + thumbnail/decode fixes (3.4, top
+   entries) — biggest UI wins for large datasets.
+5. Qwen3-VL (incl. 30B-A3B) + Gemma 4 + transformers bump (2.1, 3.5) — do
    together; both need a current transformers release.
-5. JoyCaption tag-grounding, pixai-tagger, trigger tooling, Illustrious
+6. Bucket calculator (4) — self-contained, no model dependencies; can be
+   done any time.
+7. JoyCaption tag-grounding, pixai-tagger, trigger tooling, Illustrious
    reorder (2.1, 1.3, 1.4).
-6. Legacy demotion, export presets, stats panel (2.2, 4).
+8. Remaining 3.4 items (debounces, async writes, viewer cache), legacy
+   demotion, export presets, stats panel (2.2, 4).
 
 ---
 
