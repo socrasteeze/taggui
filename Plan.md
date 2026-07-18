@@ -53,8 +53,17 @@ Show `n / limit` and color-code accordingly; keep CLIP as the default.
 ## 2. Auto-captioning model roster
 
 ### 2.1 Add
-- **Qwen3-VL Instruct (2B/4B/8B)** — the current community favorite for NL
-  captions: low VRAM, fast, detailed. Highest-value addition.
+- **Qwen3-VL Instruct (2B/4B/8B, and 30B-A3B)** — the current community
+  favorite for NL captions. The small dense variants cover low-VRAM setups;
+  **Qwen3-VL-30B-A3B** (MoE, 30B total / 3B active per token) is the quality
+  pick — near-flagship captions at moderate inference cost, and it quantizes
+  well (4-bit fits in ~20 GB). Highest-value addition.
+- **Gemma 4 31B IT** (Google, Mar 2026, Apache 2.0) — flagship dense
+  open-weights VLM built from Gemini 3 research; strong detailed captioning
+  with variable aspect-ratio image input. Heavier than Qwen3-VL-30B-A3B (all
+  31B params are dense), so it wants 4-bit on consumer GPUs; offer it
+  alongside Qwen3-VL as the two "high quality" captioners. The smaller
+  Gemma 4 E4B is a candidate for the low-VRAM tier.
 - **pixai-tagger-v0.9** — newer Danbooru snapshot than WD v3, better recall
   and newer character coverage; complements wd-eva02-large-tagger-v3.
 - **JoyCaption tag-grounded mode** — Beta One accepts WD tags as input to
@@ -101,7 +110,9 @@ calling `imagesize.get()` plus an `exifread` file-open per image. On a
   reload per invocation).
 - Expose batch size for VLM captioners where the backend supports it.
 - Prefer `dtype=bfloat16` + FlashAttention where already installed; 4-bit
-  (bitsandbytes) already exists for JoyCaption — extend to Qwen3-VL.
+  (bitsandbytes) already exists for JoyCaption — extend it to Qwen3-VL and
+  Gemma 4, where it's effectively required on consumer GPUs (30B-A3B ≈ 20 GB,
+  Gemma 4 31B ≈ 18–20 GB at 4-bit).
 
 ### 3.4 Dependency refresh
 - `transformers==4.48.3` (early 2025) is too old for Qwen3-VL — bump to a
@@ -126,7 +137,8 @@ calling `imagesize.get()` plus an `exifread` file-open per image. On a
 1. WD tagger GPU + batching (3.1) — small diff, immediate payoff.
 2. Parallel directory loading (3.2).
 3. Caption profiles + per-encoder token counter (1.1, 1.2).
-4. Qwen3-VL + transformers bump (2.1, 3.4) — do together.
+4. Qwen3-VL (incl. 30B-A3B) + Gemma 4 + transformers bump (2.1, 3.4) — do
+   together; both need a current transformers release.
 5. JoyCaption tag-grounding, pixai-tagger, trigger tooling, Illustrious
    reorder (2.1, 1.3, 1.4).
 6. Legacy demotion, export presets, stats panel (2.2, 4).
