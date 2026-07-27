@@ -13,8 +13,11 @@ set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 REM Copy of requirements.txt written only after a successful install. Its
 REM absence (or difference) means the environment is incomplete, so an install
 REM that failed or was interrupted is retried instead of silently launching a
-REM broken interpreter.
-set "STAMP=%VENV_DIR%\.installed-requirements.txt"
+REM broken interpreter. Name intentionally does NOT start with a dot — Windows
+REM `if exist` is unreliable with some dotted filenames.
+set "STAMP=%VENV_DIR%\installed-requirements.txt"
+REM Legacy stamp from earlier builds (leading-dot name).
+set "LEGACY_STAMP=%VENV_DIR%\.installed-requirements.txt"
 
 REM Keep the Hugging Face model cache on the C: drive (an SSD). This is the
 REM standard location under the user profile; models download here once and
@@ -73,25 +76,47 @@ if errorlevel 1 goto :venv_broken
 
 REM Reinstall when requirements.txt changed since the last successful install,
 REM or when no successful install was ever recorded.
-if "%DO_INSTALL%"=="1" goto :install
-if not exist "%STAMP%" goto :install
-fc /b "%STAMP%" requirements.txt >nul 2>&1
-if errorlevel 1 goto :install
+if "%DO_INSTALL%"=="1" (
+  echo Forcing dependency install because "update" was requested.
+  goto :install
+)
+REM Migrate legacy dotted stamp name if present.
+if exist "%STAMP%" goto :stamp_ready
+if exist "%LEGACY_STAMP%" (
+  copy /y /b "%LEGACY_STAMP%" "%STAMP%" >nul
+  del /q "%LEGACY_STAMP%" >nul 2>&1
+)
+:stamp_ready
+if not exist "%STAMP%" (
+  echo No install stamp found - installing dependencies.
+  goto :install
+)
+fc /b "%STAMP%" "requirements.txt" >nul 2>&1
+if errorlevel 1 (
+  echo requirements.txt changed since the last install - updating dependencies.
+  goto :install
+)
 
 REM The stamp says the install completed, but the environment can still be
 REM broken (a deleted package, a half-finished upgrade). Verify the two imports
 REM the app cannot start without, and repair rather than crash on launch.
 "%VENV_PY%" -c "import PySide6, torch" >nul 2>&1
-if not errorlevel 1 goto :launch
-echo Environment looks incomplete ^(PySide6 or torch failed to import^).
-echo Reinstalling dependencies...
-goto :install
+if errorlevel 1 (
+  echo Environment looks incomplete ^(PySide6 or torch failed to import^).
+  echo Reinstalling dependencies...
+  goto :install
+)
+goto :launch
 
 
 :install
 echo Installing dependencies from requirements.txt ^(this may take a while^)...
 echo The PyTorch CUDA wheel is about 2.4 GB, so the first run is slow.
-if exist "%STAMP%" del /q "%STAMP%" >nul 2>&1
+echo ^(Direct URL packages like torch/flash-attn are only touched when this
+echo install step runs - a matching stamp skips it on later launches.^)
+REM Keep the old stamp until the new install is verified, so an interrupted
+REM pip run does not force another full reinstall on the next launch for the
+REM wrong reason. Write via a temp file, then replace atomically with move.
 "%VENV_PY%" -m pip install -r requirements.txt
 if errorlevel 1 goto :install_failed
 
@@ -99,9 +124,25 @@ REM Confirm the install actually produced a usable environment before recording
 REM it. On an unsupported Python version pip exits 0 while skipping torch.
 "%VENV_PY%" -c "import PySide6, torch" >nul 2>&1
 if errorlevel 1 goto :verify_failed
-copy /y requirements.txt "%STAMP%" >nul
+copy /y /b "requirements.txt" "%STAMP%.tmp" >nul
+if errorlevel 1 goto :stamp_failed
+if not exist "%STAMP%.tmp" goto :stamp_failed
+move /y "%STAMP%.tmp" "%STAMP%" >nul
+if errorlevel 1 goto :stamp_failed
+if not exist "%STAMP%" goto :stamp_failed
 goto :launch
 
+
+:stamp_failed
+echo.
+echo Dependencies installed, but failed to write the install stamp:
+echo   %STAMP%
+echo Without that stamp, the next launch will reinstall everything again
+echo ^(including re-checking the multi-GB torch wheel^).
+echo Check that the venv folder is writable and try "run.bat update".
+echo.
+pause
+exit /b 1
 
 :launch
 echo Starting TagGUI...

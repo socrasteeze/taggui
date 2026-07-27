@@ -84,7 +84,8 @@ class TagCounterModel(QAbstractListModel):
             self.tag_counter.update(image.tags)
             self.counted_tags[image.path] = list(image.tags)
         self.most_common_tags = self.tag_counter.most_common()
-        self.modelReset.emit()
+        self.beginResetModel()
+        self.endResetModel()
 
     def update_tag_counts(self, images: list[Image], first_row: int,
                           last_row: int):
@@ -110,4 +111,5 @@ class TagCounterModel(QAbstractListModel):
         # `+ Counter()` drops tags whose count fell to zero or below.
         self.tag_counter = +self.tag_counter
         self.most_common_tags = self.tag_counter.most_common()
-        self.modelReset.emit()
+        self.beginResetModel()
+        self.endResetModel()

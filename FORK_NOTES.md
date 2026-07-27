@@ -18,10 +18,13 @@ actually landed and where.
   `requirements.txt`, pins `HF_HOME` to the local SSD cache, launches the app
   (`run.bat update` / `-u` forces a reinstall). Self-repairing: it pins the
   venv to CPython 3.11/3.12 (the only versions `requirements.txt` has Windows
-  torch wheels for), records a `venv\.installed-requirements.txt` stamp only
+  torch wheels for), records a `venv\installed-requirements.txt` stamp only
   after a *verified* install so an interrupted one is retried rather than
   silently launching a dependency-less venv, and pauses on every failure path
-  so errors stay readable when launched by double-click.
+  so errors stay readable when launched by double-click. The stamp is not
+  deleted until a replacement is written, and install is skipped when the
+  stamp still matches `requirements.txt` (avoids re-checking multi-GB torch
+  URL wheels on every launch).
 - `create_shortcut.bat` — one-click Desktop `.lnk` creator (points at
   `run.bat`, uses `images/icon.ico`).
 - `.gitattributes` — forces CRLF for `.bat` files.
