@@ -289,13 +289,18 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def _on_load_progress(self, completed: int, total: int):
-        if self._load_progress_dialog is None:
+        # `QProgressDialog.setValue()` calls `QCoreApplication.processEvents()`
+        # for modal dialogs, which can deliver the queued `load_finished`
+        # signal and close the dialog in the middle of this method. Hold a
+        # local reference and update the value last so that the dialog is
+        # never touched through `self` after the event loop has been pumped.
+        progress_dialog = self._load_progress_dialog
+        if progress_dialog is None:
             return
-        if self._load_progress_dialog.maximum() != total:
-            self._load_progress_dialog.setMaximum(max(total, 1))
-        self._load_progress_dialog.setValue(completed)
-        self._load_progress_dialog.setLabelText(
-            f'Loading images... {completed}/{total}')
+        if progress_dialog.maximum() != total:
+            progress_dialog.setMaximum(max(total, 1))
+        progress_dialog.setLabelText(f'Loading images... {completed}/{total}')
+        progress_dialog.setValue(completed)
 
     @Slot()
     def _on_load_finished(self):
