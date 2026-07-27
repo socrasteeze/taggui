@@ -12,6 +12,9 @@ timm==1.0.20
 
 # WD Tagger
 huggingface-hub==0.35.3
+# CPU package by default. For GPU WD tagging, uninstall this and install
+# onnxruntime-gpu (CUDA) or onnxruntime-directml (Windows) instead; the app
+# auto-selects CUDA/DirectML providers when available.
 onnxruntime==1.23.1
 
 # PyTorch

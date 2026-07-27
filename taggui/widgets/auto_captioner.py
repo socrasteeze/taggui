@@ -97,6 +97,17 @@ class CaptionSettingsForm(QVBoxLayout):
         remove_tag_separators_layout.addWidget(remove_tag_separators_label)
         remove_tag_separators_layout.addWidget(
             self.remove_tag_separators_check_box)
+        self.joycaption_grounding_container = QWidget()
+        joycaption_grounding_layout = QHBoxLayout(
+            self.joycaption_grounding_container)
+        joycaption_grounding_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        joycaption_grounding_layout.setContentsMargins(0, 0, 0, 0)
+        self.joycaption_tag_grounding_check_box = SettingsBigCheckBox(
+            key='joycaption_tag_grounding', default=False)
+        joycaption_grounding_layout.addWidget(
+            QLabel('Ground JoyCaption on existing tags'))
+        joycaption_grounding_layout.addWidget(
+            self.joycaption_tag_grounding_check_box)
         basic_settings_form.addRow('Model', self.model_combo_box)
         self.prompt_label = QLabel('Prompt')
         basic_settings_form.addRow(self.prompt_label, self.prompt_text_edit)
@@ -109,6 +120,7 @@ class CaptionSettingsForm(QVBoxLayout):
         basic_settings_form.addRow(self.device_label, self.device_combo_box)
         basic_settings_form.addRow(self.load_in_4_bit_container)
         basic_settings_form.addRow(self.remove_tag_separators_container)
+        basic_settings_form.addRow(self.joycaption_grounding_container)
 
         self.wd_tagger_settings_form_container = QWidget()
         wd_tagger_settings_form = QFormLayout(
@@ -273,6 +285,7 @@ class CaptionSettingsForm(QVBoxLayout):
             self.device_combo_box,
             self.load_in_4_bit_container,
             self.remove_tag_separators_container,
+            self.joycaption_grounding_container,
             self.horizontal_line,
             self.toggle_advanced_settings_form_button,
             self.advanced_settings_form_container
@@ -282,6 +295,9 @@ class CaptionSettingsForm(QVBoxLayout):
             widget.setVisible(is_wd_tagger_model)
         for widget in non_wd_tagger_widgets:
             widget.setVisible(not is_wd_tagger_model)
+        is_joycaption = 'joycaption' in model_id.lower()
+        self.joycaption_grounding_container.setVisible(
+            (not is_wd_tagger_model) and is_joycaption)
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
     @Slot(str)
@@ -339,7 +355,9 @@ class CaptionSettingsForm(QVBoxLayout):
                 'max_tags': self.max_tags_spin_box.value(),
                 'tags_to_exclude':
                     self.tags_to_exclude_text_edit.toPlainText()
-            }
+            },
+            'joycaption_tag_grounding':
+                self.joycaption_tag_grounding_check_box.isChecked(),
         }
 
 

@@ -377,6 +377,23 @@ class ImageList(QDockWidget):
             self.list_view.setSelectionMode(
                 QAbstractItemView.SelectionMode.MultiSelection)
 
+    def set_view_mode(self, mode: str):
+        """Switch between list and icon/grid views."""
+        if mode == 'grid':
+            self.list_view.setViewMode(QListView.ViewMode.IconMode)
+            self.list_view.setWrapping(True)
+            self.list_view.setFlow(QListView.Flow.LeftToRight)
+            self.list_view.setResizeMode(QListView.ResizeMode.Adjust)
+            self.list_view.setWordWrap(False)
+            # Show filename only under thumbnails in grid mode.
+            self.list_view.setUniformItemSizes(False)
+        else:
+            self.list_view.setViewMode(QListView.ViewMode.ListMode)
+            self.list_view.setWrapping(False)
+            self.list_view.setFlow(QListView.Flow.TopToBottom)
+            self.list_view.setWordWrap(True)
+            self.list_view.setUniformItemSizes(False)
+
     @Slot()
     def update_image_index_label(self, proxy_image_index: QModelIndex):
         image_count = self.proxy_image_list_model.rowCount()

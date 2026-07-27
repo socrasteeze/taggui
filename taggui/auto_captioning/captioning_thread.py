@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -5,12 +6,12 @@ from time import perf_counter
 from PIL import UnidentifiedImageError
 from PySide6.QtCore import QModelIndex, QThread, Qt, Signal
 
-from auto_captioning.auto_captioning_model import AutoCaptioningModel
-from auto_captioning.models_list import get_model_class
 from models.image_list_model import ImageListModel
 from utils.enums import CaptionPosition
 from utils.image import Image
 from utils.settings import get_tag_separator
+
+WD_BATCH_SIZE = 8
 
 
 def add_caption_to_tags(tags: list[str], caption: str,
@@ -19,8 +20,6 @@ def add_caption_to_tags(tags: list[str], caption: str,
         return tags
     tag_separator = get_tag_separator()
     new_tags = caption.split(tag_separator)
-    # Make a copy of the tags so that the tags in the image list model are not
-    # modified.
     tags = tags.copy()
     if caption_position == CaptionPosition.BEFORE_FIRST_TAG:
         tags[:0] = new_tags
@@ -55,9 +54,6 @@ def format_duration(seconds: float) -> str:
 class CaptioningThread(QThread):
     text_outputted = Signal(str)
     clear_console_text_edit_requested = Signal()
-    # The image index, the caption, and the tags with the caption added. The
-    # third parameter must be declared as `list` instead of `list[str]` for it
-    # to work.
     caption_generated = Signal(QModelIndex, str, list)
     progress_bar_update_requested = Signal(int)
 
@@ -74,10 +70,22 @@ class CaptioningThread(QThread):
         self.is_error = False
         self.is_canceled = False
 
+    def _prepare_inputs(self, model, image_index):
+        image: Image = self.image_list_model.data(image_index,
+                                                  Qt.ItemDataRole.UserRole)
+        image_prompt = model.get_image_prompt(image)
+        model_inputs = model.get_model_inputs(image_prompt, image)
+        return image, image_prompt, model_inputs
+
     def run_captioning(self):
+        # Lazy imports avoid circular import with auto_captioning_model /
+        # models_list during module initialization.
+        from auto_captioning.models_list import get_model_class
+        from auto_captioning.models.wd_tagger import WdTagger
+
         model_id = self.caption_settings['model_id']
         model_class = get_model_class(model_id)
-        model: AutoCaptioningModel = model_class(
+        model = model_class(
             captioning_thread_=self, caption_settings=self.caption_settings)
         error_message = model.get_error_message()
         if error_message:
@@ -98,32 +106,58 @@ class CaptioningThread(QThread):
             are_multiple_images_selected, captioning_start_datetime)
         print(captioning_message)
         caption_position = self.caption_settings['caption_position']
-        for i, image_index in enumerate(self.selected_image_indices):
-            start_time = perf_counter()
-            if self.is_canceled:
-                print('Canceled captioning.')
-                return
-            image: Image = self.image_list_model.data(image_index,
-                                                      Qt.ItemDataRole.UserRole)
-            image_prompt = model.get_image_prompt(image)
-            try:
-                model_inputs = model.get_model_inputs(image_prompt, image)
-            except UnidentifiedImageError:
-                print(f'Skipping {image.path.name} because its file format is '
-                      'not supported or it is a corrupted image.')
-                continue
-            caption, console_output_caption = model.generate_caption(
-                model_inputs, image_prompt)
-            tags = add_caption_to_tags(image.tags, caption, caption_position)
-            self.caption_generated.emit(image_index, caption, tags)
-            if are_multiple_images_selected:
-                self.progress_bar_update_requested.emit(i + 1)
-            if i == 0 and not are_multiple_images_selected:
-                self.clear_console_text_edit_requested.emit()
-            if console_output_caption is None:
-                console_output_caption = caption
-            print(f'{image.path.name} ({perf_counter() - start_time:.1f} s):\n'
-                  f'{console_output_caption}')
+
+        if isinstance(model, WdTagger) and selected_image_count > 1:
+            self._run_wd_batched(model, caption_position,
+                                 are_multiple_images_selected,
+                                 captioning_start_datetime)
+            return
+
+        # Prefetch the next image's inputs on a worker while the GPU generates.
+        with ThreadPoolExecutor(max_workers=1) as prefetch_pool:
+            next_future = None
+            for i, image_index in enumerate(self.selected_image_indices):
+                start_time = perf_counter()
+                if self.is_canceled:
+                    print('Canceled captioning.')
+                    return
+                try:
+                    if next_future is not None:
+                        image, image_prompt, model_inputs = next_future.result()
+                    else:
+                        image, image_prompt, model_inputs = self._prepare_inputs(
+                            model, image_index)
+                except UnidentifiedImageError:
+                    skipped = self.image_list_model.data(
+                        image_index, Qt.ItemDataRole.UserRole)
+                    name = skipped.path.name if skipped else 'image'
+                    print(f'Skipping {name} because its file format is not '
+                          'supported or it is a corrupted image.')
+                    next_future = None
+                    if i + 1 < selected_image_count:
+                        next_future = prefetch_pool.submit(
+                            self._prepare_inputs, model,
+                            self.selected_image_indices[i + 1])
+                    continue
+                if i + 1 < selected_image_count:
+                    next_future = prefetch_pool.submit(
+                        self._prepare_inputs, model,
+                        self.selected_image_indices[i + 1])
+                else:
+                    next_future = None
+                caption, console_output_caption = model.generate_caption(
+                    model_inputs, image_prompt)
+                tags = add_caption_to_tags(image.tags, caption,
+                                           caption_position)
+                self.caption_generated.emit(image_index, caption, tags)
+                if are_multiple_images_selected:
+                    self.progress_bar_update_requested.emit(i + 1)
+                if i == 0 and not are_multiple_images_selected:
+                    self.clear_console_text_edit_requested.emit()
+                if console_output_caption is None:
+                    console_output_caption = caption
+                print(f'{image.path.name} ({perf_counter() - start_time:.1f} s):\n'
+                      f'{console_output_caption}')
         if are_multiple_images_selected:
             captioning_end_datetime = datetime.now()
             total_captioning_duration = ((captioning_end_datetime
@@ -136,12 +170,59 @@ class CaptioningThread(QThread):
                   f'({average_captioning_duration:.1f} s/image) at '
                   f'{captioning_end_datetime.strftime("%Y-%m-%d %H:%M:%S")}.')
 
+    def _run_wd_batched(self, model, caption_position,
+                        are_multiple_images_selected,
+                        captioning_start_datetime):
+        selected_image_count = len(self.selected_image_indices)
+        processed = 0
+        for batch_start in range(0, selected_image_count, WD_BATCH_SIZE):
+            if self.is_canceled:
+                print('Canceled captioning.')
+                return
+            batch_indices = self.selected_image_indices[
+                batch_start:batch_start + WD_BATCH_SIZE]
+            prepared = []
+            for image_index in batch_indices:
+                image: Image = self.image_list_model.data(
+                    image_index, Qt.ItemDataRole.UserRole)
+                try:
+                    model_inputs = model.get_model_inputs('', image)
+                except UnidentifiedImageError:
+                    print(f'Skipping {image.path.name} because its file '
+                          'format is not supported or it is a corrupted '
+                          'image.')
+                    continue
+                prepared.append((image_index, image, model_inputs))
+            if not prepared:
+                continue
+            captions = model.generate_captions_batch(
+                [item[2] for item in prepared])
+            for (image_index, image, _), (caption, console_output_caption) in (
+                    zip(prepared, captions)):
+                tags = add_caption_to_tags(image.tags, caption,
+                                           caption_position)
+                self.caption_generated.emit(image_index, caption, tags)
+                processed += 1
+                if are_multiple_images_selected:
+                    self.progress_bar_update_requested.emit(processed)
+                print(f'{image.path.name}:\n{console_output_caption}')
+        captioning_end_datetime = datetime.now()
+        total_captioning_duration = ((captioning_end_datetime
+                                      - captioning_start_datetime)
+                                     .total_seconds())
+        if selected_image_count:
+            average_captioning_duration = (total_captioning_duration /
+                                           selected_image_count)
+            print(f'Finished captioning {selected_image_count} images in '
+                  f'{format_duration(total_captioning_duration)} '
+                  f'({average_captioning_duration:.1f} s/image) at '
+                  f'{captioning_end_datetime.strftime("%Y-%m-%d %H:%M:%S")}.')
+
     def run(self):
         try:
             self.run_captioning()
         except Exception as exception:
             self.is_error = True
-            # Show the error message in the console text edit.
             raise exception
 
     def write(self, text: str):

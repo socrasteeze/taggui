@@ -3,26 +3,30 @@ import random
 import re
 import sys
 from collections import Counter, deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 import exifread
 import imagesize
-from PySide6.QtCore import (QAbstractListModel, QModelIndex, QSize, Qt, Signal,
-                            Slot)
-from PySide6.QtGui import QIcon, QImageReader, QPixmap
+from PySide6.QtCore import (QAbstractListModel, QModelIndex, QRunnable, QSize,
+                            Qt, QThread, QThreadPool, Signal, Slot)
+from PySide6.QtGui import QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QMessageBox
 
+from utils.dimension_cache import DimensionCache
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
+from utils.tag_writer import TagWriter
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
 UNDO_STACK_SIZE = 32
 
-
 BACKUP_DIRECTORY_NAME = 'original_images'
+
+# Formats that commonly carry EXIF orientation.
+_EXIF_SUFFIXES = {'.jpg', '.jpeg', '.tif', '.tiff', '.webp'}
 
 
 def get_file_paths(directory_path: Path) -> set[Path]:
@@ -43,7 +47,8 @@ def get_file_paths(directory_path: Path) -> set[Path]:
 @dataclass
 class HistoryItem:
     action_name: str
-    tags: list[list[str]]
+    # Sparse map of image index -> tags before the action.
+    previous_tags: dict[int, list[str]]
     should_ask_for_confirmation: bool
 
 
@@ -53,8 +58,124 @@ class Scope(str, Enum):
     SELECTED_IMAGES = 'Selected images'
 
 
+class DirectoryLoadWorker(QThread):
+    progress = Signal(int, int)
+    finished_loading = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, directory_path: Path, tag_separator: str,
+                 image_suffixes: list[str], dimension_cache: DimensionCache):
+        super().__init__()
+        self.directory_path = directory_path
+        self.tag_separator = tag_separator
+        self.image_suffixes = image_suffixes
+        self.dimension_cache = dimension_cache
+
+    def run(self):
+        try:
+            file_paths = get_file_paths(self.directory_path)
+            image_paths = sorted(
+                path for path in file_paths
+                if path.suffix.lower() in self.image_suffixes)
+            text_file_path_strings = {str(path) for path in file_paths
+                                      if path.suffix == '.txt'}
+            total = len(image_paths)
+            images: list[Image] = []
+            max_workers = min(32, (os.cpu_count() or 4) * 4)
+            completed = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self._load_image, image_path, text_file_path_strings
+                    ): image_path
+                    for image_path in image_paths
+                }
+                for future in as_completed(futures):
+                    images.append(future.result())
+                    completed += 1
+                    if completed == 1 or completed == total or completed % 25 == 0:
+                        self.progress.emit(completed, total)
+            images.sort(key=lambda image_: image_.path)
+            self.dimension_cache.save()
+            self.finished_loading.emit(images)
+        except Exception as exception:
+            self.failed.emit(str(exception))
+
+    def _load_image(self, image_path: Path,
+                    text_file_path_strings: set[str]) -> Image:
+        dimensions = self.dimension_cache.get(image_path)
+        if dimensions is None:
+            try:
+                dimensions = imagesize.get(image_path)
+                if image_path.suffix.lower() in _EXIF_SUFFIXES:
+                    with open(image_path, 'rb') as image_file:
+                        try:
+                            exif_tags = exifread.process_file(
+                                image_file, details=False,
+                                stop_tag='Image Orientation')
+                            if 'Image Orientation' in exif_tags:
+                                orientations = (
+                                    exif_tags['Image Orientation'].values)
+                                if any(value in orientations
+                                       for value in (5, 6, 7, 8)):
+                                    dimensions = (dimensions[1],
+                                                  dimensions[0])
+                        except Exception as exception:
+                            print(f'Failed to get Exif tags for {image_path}: '
+                                  f'{exception}', file=sys.stderr)
+                self.dimension_cache.set(image_path, dimensions)
+            except (ValueError, OSError) as exception:
+                print(f'Failed to get dimensions for {image_path}: '
+                      f'{exception}', file=sys.stderr)
+                dimensions = None
+        tags = []
+        text_file_path = image_path.with_suffix('.txt')
+        if str(text_file_path) in text_file_path_strings:
+            caption = text_file_path.read_text(encoding='utf-8',
+                                               errors='replace')
+            if caption:
+                tags = caption.split(self.tag_separator)
+                tags = [tag.strip() for tag in tags]
+                tags = [tag for tag in tags if tag]
+        return Image(image_path, dimensions, tags)
+
+
+class _ThumbnailTask(QRunnable):
+    def __init__(self, model: 'ImageListModel', row: int, path: Path,
+                 width: int):
+        super().__init__()
+        self.model = model
+        self.row = row
+        self.path = path
+        self.width = width
+
+    def run(self):
+        try:
+            image_reader = QImageReader(str(self.path))
+            image_reader.setAutoTransform(True)
+            source_size = image_reader.size()
+            if source_size.isValid() and source_size.width() > 0:
+                scaled_height = round(self.width * source_size.height()
+                                      / source_size.width())
+                image_reader.setScaledSize(
+                    QSize(self.width, max(scaled_height, 1)))
+            image = image_reader.read()
+            if (not image.isNull() and image.width() != self.width
+                    and image.width() > 0):
+                image = image.scaledToWidth(
+                    self.width, Qt.TransformationMode.SmoothTransformation)
+            self.model.thumbnail_ready.emit(self.row, str(self.path), image)
+        except Exception:
+            self.model.thumbnail_ready.emit(self.row, str(self.path),
+                                            QImage())
+
+
 class ImageListModel(QAbstractListModel):
     update_undo_and_redo_actions_requested = Signal()
+    load_progress = Signal(int, int)
+    load_finished = Signal()
+    load_failed = Signal(str)
+    thumbnail_ready = Signal(int, str, QImage)
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
@@ -65,6 +186,12 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack = []
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
+        self.dimension_cache = DimensionCache()
+        self.tag_writer = TagWriter()
+        self._load_worker: DirectoryLoadWorker | None = None
+        self._thumbnail_pool = QThreadPool.globalInstance()
+        self._pending_thumbnails: set[int] = set()
+        self.thumbnail_ready.connect(self._on_thumbnail_ready)
 
     def rowCount(self, parent=None) -> int:
         return len(self.images)
@@ -74,57 +201,61 @@ class ImageListModel(QAbstractListModel):
         if role == Qt.ItemDataRole.UserRole:
             return image
         if role == Qt.ItemDataRole.DisplayRole:
-            # The text shown next to the thumbnail in the image list.
             text = image.path.name
             if image.tags:
                 caption = self.tag_separator.join(image.tags)
                 text += f'\n{caption}'
             return text
         if role == Qt.ItemDataRole.DecorationRole:
-            # The thumbnail. If the image already has a thumbnail stored, use
-            # it. Otherwise, generate a thumbnail and save it to the image.
             if image.thumbnail:
                 return image.thumbnail
-            image_reader = QImageReader(str(image.path))
-            # Rotate the image based on the orientation tag.
-            image_reader.setAutoTransform(True)
-            # Downsample while decoding instead of decoding the full-resolution
-            # image and scaling afterwards. This greatly reduces the CPU and
-            # memory cost of generating thumbnails for large images.
-            source_size = image_reader.size()
-            if source_size.isValid() and source_size.width() > 0:
-                scaled_height = round(self.image_list_image_width
-                                      * source_size.height()
-                                      / source_size.width())
-                image_reader.setScaledSize(
-                    QSize(self.image_list_image_width, max(scaled_height, 1)))
-            pixmap = QPixmap.fromImageReader(image_reader)
-            # Correct the width in case an Exif rotation swapped the dimensions.
-            if pixmap.width() != self.image_list_image_width:
-                pixmap = pixmap.scaledToWidth(
-                    self.image_list_image_width,
-                    Qt.TransformationMode.SmoothTransformation)
-            thumbnail = QIcon(pixmap)
-            image.thumbnail = thumbnail
-            return thumbnail
+            row = index.row()
+            if row not in self._pending_thumbnails:
+                self._pending_thumbnails.add(row)
+                task = _ThumbnailTask(self, row, image.path,
+                                      self.image_list_image_width)
+                self._thumbnail_pool.start(task)
+            return QIcon()
         if role == Qt.ItemDataRole.SizeHintRole:
             if image.thumbnail:
-                return image.thumbnail.availableSizes()[0]
+                sizes = image.thumbnail.availableSizes()
+                if sizes:
+                    return sizes[0]
             dimensions = image.dimensions
             if not dimensions:
                 return QSize(self.image_list_image_width,
                              self.image_list_image_width)
             width, height = dimensions
-            # Scale the dimensions to the image width.
             return QSize(self.image_list_image_width,
                          int(self.image_list_image_width * height / width))
 
+    @Slot(int, str, QImage)
+    def _on_thumbnail_ready(self, row: int, path_str: str, qimage: QImage):
+        self._pending_thumbnails.discard(row)
+        if row < 0 or row >= len(self.images):
+            return
+        image = self.images[row]
+        if str(image.path) != path_str:
+            return
+        if qimage.isNull():
+            return
+        image.thumbnail = QIcon(QPixmap.fromImage(qimage))
+        model_index = self.index(row)
+        self.dataChanged.emit(model_index, model_index,
+                              [Qt.ItemDataRole.DecorationRole,
+                               Qt.ItemDataRole.SizeHintRole])
+
     def load_directory(self, directory_path: Path):
+        """Start an asynchronous directory load (non-blocking)."""
+        if self._load_worker and self._load_worker.isRunning():
+            self._load_worker.wait(1000)
+        self.beginResetModel()
         self.images.clear()
+        self.endResetModel()
         self.undo_stack.clear()
         self.redo_stack.clear()
+        self._pending_thumbnails.clear()
         self.update_undo_and_redo_actions_requested.emit()
-        file_paths = get_file_paths(directory_path)
         settings = get_settings()
         image_suffixes_string = settings.value(
             'image_list_file_formats',
@@ -135,80 +266,68 @@ class ImageListModel(QAbstractListModel):
             if not suffix.startswith('.'):
                 suffix = '.' + suffix
             image_suffixes.append(suffix)
-        image_paths = {path for path in file_paths
-                       if path.suffix.lower() in image_suffixes}
-        # Comparing paths is slow on some systems, so convert the paths to
-        # strings.
-        text_file_path_strings = {str(path) for path in file_paths
-                                  if path.suffix == '.txt'}
-        # Reading each image's dimensions, Exif orientation, and caption file is
-        # I/O-bound, so process the images in parallel. This is much faster than
-        # a sequential loop on large datasets, especially over a network drive.
-        max_workers = min(32, (os.cpu_count() or 4) * 4)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            self.images = list(executor.map(
-                lambda image_path: self._load_image(image_path,
-                                                    text_file_path_strings),
-                image_paths))
-        self.images.sort(key=lambda image_: image_.path)
-        self.modelReset.emit()
+        self._load_worker = DirectoryLoadWorker(
+            directory_path, self.tag_separator, image_suffixes,
+            self.dimension_cache)
+        self._load_worker.progress.connect(self.load_progress)
+        self._load_worker.finished_loading.connect(self._on_load_finished)
+        self._load_worker.failed.connect(self.load_failed)
+        self._load_worker.start()
 
-    def _load_image(self, image_path: Path,
-                    text_file_path_strings: set[str]) -> Image:
-        """Read a single image's dimensions, orientation, and caption tags."""
-        try:
-            dimensions = imagesize.get(image_path)
-            # Check the Exif orientation tag and rotate the dimensions if
-            # necessary.
-            with open(image_path, 'rb') as image_file:
-                try:
-                    exif_tags = exifread.process_file(
-                        image_file, details=False,
-                        stop_tag='Image Orientation')
-                    if 'Image Orientation' in exif_tags:
-                        orientations = exif_tags['Image Orientation'].values
-                        if any(value in orientations
-                               for value in (5, 6, 7, 8)):
-                            dimensions = (dimensions[1], dimensions[0])
-                except Exception as exception:
-                    print(f'Failed to get Exif tags for {image_path}: '
-                          f'{exception}', file=sys.stderr)
-        except (ValueError, OSError) as exception:
-            print(f'Failed to get dimensions for {image_path}: '
-                  f'{exception}', file=sys.stderr)
-            dimensions = None
-        tags = []
-        text_file_path = image_path.with_suffix('.txt')
-        if str(text_file_path) in text_file_path_strings:
-            # `errors='replace'` inserts a replacement marker such as '?'
-            # when there is malformed data.
-            caption = text_file_path.read_text(encoding='utf-8',
-                                               errors='replace')
-            if caption:
-                tags = caption.split(self.tag_separator)
-                tags = [tag.strip() for tag in tags]
-                tags = [tag for tag in tags if tag]
-        return Image(image_path, dimensions, tags)
+    @Slot(list)
+    def _on_load_finished(self, images: list):
+        self.beginResetModel()
+        self.images = images
+        self.endResetModel()
+        self.load_finished.emit()
 
     def add_to_undo_stack(self, action_name: str,
-                          should_ask_for_confirmation: bool):
-        """Add the current state of the image tags to the undo stack."""
-        tags = [image.tags.copy() for image in self.images]
-        self.undo_stack.append(HistoryItem(action_name, tags,
+                          should_ask_for_confirmation: bool,
+                          image_indices: list[int] | None = None):
+        """Add a sparse snapshot of image tags to the undo stack."""
+        if image_indices is None:
+            previous_tags = {i: image.tags.copy()
+                             for i, image in enumerate(self.images)}
+        else:
+            previous_tags = {i: self.images[i].tags.copy()
+                             for i in image_indices}
+        self.undo_stack.append(HistoryItem(action_name, previous_tags,
                                            should_ask_for_confirmation))
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
 
+    def _commit_changes(self, action_name: str,
+                        should_ask_for_confirmation: bool,
+                        changes: dict[int, list[str]]):
+        """
+        Apply tag changes. `changes` maps image index -> tags *before* the
+        change; the images already hold the new tags.
+        """
+        if not changes:
+            return
+        self.undo_stack.append(HistoryItem(
+            action_name, {i: tags.copy() for i, tags in changes.items()},
+            should_ask_for_confirmation))
+        self.redo_stack.clear()
+        self.update_undo_and_redo_actions_requested.emit()
+        changed_indices = sorted(changes)
+        for image_index in changed_indices:
+            image = self.images[image_index]
+            image.token_count = None
+            self.write_image_tags_to_disk(image)
+        self.dataChanged.emit(self.index(changed_indices[0]),
+                              self.index(changed_indices[-1]))
+
     def write_image_tags_to_disk(self, image: Image):
-        try:
-            image.path.with_suffix('.txt').write_text(
-                self.tag_separator.join(image.tags), encoding='utf-8',
-                errors='replace')
-        except OSError:
+        text = self.tag_separator.join(image.tags)
+        self.tag_writer.enqueue(image.path.with_suffix('.txt'), text)
+        errors = self.tag_writer.pop_errors()
+        if errors:
             error_message_box = QMessageBox()
             error_message_box.setWindowTitle('Error')
             error_message_box.setIcon(QMessageBox.Icon.Critical)
-            error_message_box.setText(f'Failed to save tags for {image.path}.')
+            error_message_box.setText(
+                f'Failed to save tags for {errors[0]}.')
             error_message_box.exec()
 
     def restore_history_tags(self, is_undo: bool):
@@ -216,7 +335,6 @@ class ImageListModel(QAbstractListModel):
             source_stack = self.undo_stack
             destination_stack = self.redo_stack
         else:
-            # Redo.
             source_stack = self.redo_stack
             destination_stack = self.undo_stack
         if not source_stack:
@@ -231,31 +349,34 @@ class ImageListModel(QAbstractListModel):
             if reply != QMessageBox.StandardButton.Yes:
                 return
         source_stack.pop()
-        tags = [image.tags for image in self.images]
-        destination_stack.append(HistoryItem(
-            history_item.action_name, tags,
-            history_item.should_ask_for_confirmation))
+        redo_previous: dict[int, list[str]] = {}
         changed_image_indices = []
-        for image_index, (image, history_image_tags) in enumerate(
-                zip(self.images, history_item.tags)):
+        for image_index, history_image_tags in history_item.previous_tags.items():
+            if image_index < 0 or image_index >= len(self.images):
+                continue
+            image = self.images[image_index]
             if image.tags == history_image_tags:
                 continue
+            redo_previous[image_index] = image.tags.copy()
             changed_image_indices.append(image_index)
-            image.tags = history_image_tags
+            image.tags = history_image_tags.copy()
+            image.token_count = None
             self.write_image_tags_to_disk(image)
+        destination_stack.append(HistoryItem(
+            history_item.action_name, redo_previous,
+            history_item.should_ask_for_confirmation))
         if changed_image_indices:
+            changed_image_indices.sort()
             self.dataChanged.emit(self.index(changed_image_indices[0]),
                                   self.index(changed_image_indices[-1]))
         self.update_undo_and_redo_actions_requested.emit()
 
     @Slot()
     def undo(self):
-        """Undo the last action."""
         self.restore_history_tags(is_undo=True)
 
     @Slot()
     def redo(self):
-        """Redo the last undone action."""
         self.restore_history_tags(is_undo=False)
 
     def is_image_in_scope(self, scope: Scope | str, image_index: int,
@@ -272,7 +393,6 @@ class ImageListModel(QAbstractListModel):
 
     def get_text_match_count(self, text: str, scope: Scope | str,
                              whole_tags_only: bool, use_regex: bool) -> int:
-        """Get the number of instances of a text in all captions."""
         match_count = 0
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
@@ -296,15 +416,9 @@ class ImageListModel(QAbstractListModel):
 
     def find_and_replace(self, find_text: str, replace_text: str,
                          scope: Scope | str, use_regex: bool):
-        """
-        Find and replace arbitrary text in captions, within and across tag
-        boundaries.
-        """
         if not find_text:
             return
-        self.add_to_undo_stack(action_name='Find and Replace',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
@@ -312,177 +426,200 @@ class ImageListModel(QAbstractListModel):
             if use_regex:
                 if not re.search(pattern=find_text, string=caption):
                     continue
-                caption = re.sub(pattern=find_text, repl=replace_text,
-                                 string=caption)
+                new_caption = re.sub(pattern=find_text, repl=replace_text,
+                                     string=caption)
             else:
                 if find_text not in caption:
                     continue
-                caption = caption.replace(find_text, replace_text)
-            changed_image_indices.append(image_index)
-            image.tags = caption.split(self.tag_separator)
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+                new_caption = caption.replace(find_text, replace_text)
+            old_tags = image.tags.copy()
+            image.tags = new_caption.split(self.tag_separator)
+            changes[image_index] = old_tags
+        self._commit_changes('Find and Replace', True, changes)
 
     def sort_tags_alphabetically(self, do_not_reorder_first_tag: bool):
-        """Sort the tags for each image in alphabetical order."""
-        self.add_to_undo_stack(action_name='Sort Tags',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
-            old_caption = self.tag_separator.join(image.tags)
+            old_tags = image.tags.copy()
             if do_not_reorder_first_tag:
                 first_tag = image.tags[0]
                 image.tags = [first_tag] + sorted(image.tags[1:])
             else:
-                image.tags.sort()
-            new_caption = self.tag_separator.join(image.tags)
-            if new_caption != old_caption:
-                changed_image_indices.append(image_index)
-                self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+                image.tags = sorted(image.tags)
+            if image.tags != old_tags:
+                changes[image_index] = old_tags
+        self._commit_changes('Sort Tags', True, changes)
 
     def sort_tags_by_frequency(self, tag_counter: Counter,
                                do_not_reorder_first_tag: bool):
-        """
-        Sort the tags for each image by the total number of times a tag appears
-        across all images.
-        """
-        self.add_to_undo_stack(action_name='Sort Tags',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
-            old_caption = self.tag_separator.join(image.tags)
+            old_tags = image.tags.copy()
             if do_not_reorder_first_tag:
                 first_tag = image.tags[0]
                 image.tags = [first_tag] + sorted(
                     image.tags[1:], key=lambda tag: tag_counter[tag],
                     reverse=True)
             else:
-                image.tags.sort(key=lambda tag: tag_counter[tag], reverse=True)
-            new_caption = self.tag_separator.join(image.tags)
-            if new_caption != old_caption:
-                changed_image_indices.append(image_index)
-                self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+                image.tags = sorted(
+                    image.tags, key=lambda tag: tag_counter[tag], reverse=True)
+            if image.tags != old_tags:
+                changes[image_index] = old_tags
+        self._commit_changes('Sort Tags', True, changes)
 
     def reverse_tags_order(self, do_not_reorder_first_tag: bool):
-        """Reverse the order of the tags for each image."""
-        self.add_to_undo_stack(action_name='Reverse Order of Tags',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
-            changed_image_indices.append(image_index)
+            old_tags = image.tags.copy()
             if do_not_reorder_first_tag:
                 image.tags = [image.tags[0]] + list(reversed(image.tags[1:]))
             else:
                 image.tags = list(reversed(image.tags))
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            changes[image_index] = old_tags
+        self._commit_changes('Reverse Order of Tags', True, changes)
 
     def shuffle_tags(self, do_not_reorder_first_tag: bool):
-        """Shuffle the tags for each image randomly."""
-        self.add_to_undo_stack(action_name='Shuffle Tags',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if len(image.tags) < 2:
                 continue
-            changed_image_indices.append(image_index)
+            old_tags = image.tags.copy()
             if do_not_reorder_first_tag:
                 first_tag, *remaining_tags = image.tags
                 random.shuffle(remaining_tags)
                 image.tags = [first_tag] + remaining_tags
             else:
-                random.shuffle(image.tags)
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+                shuffled = image.tags[:]
+                random.shuffle(shuffled)
+                image.tags = shuffled
+            changes[image_index] = old_tags
+        self._commit_changes('Shuffle Tags', True, changes)
 
     def move_tags_to_front(self, tags_to_move: list[str]):
-        """
-        Move one or more tags to the front of the tags list for each image.
-        """
-        self.add_to_undo_stack(action_name='Move Tags to Front',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if not any(tag in image.tags for tag in tags_to_move):
                 continue
-            old_caption = self.tag_separator.join(image.tags)
+            old_tags = image.tags.copy()
             moved_tags = []
             for tag in tags_to_move:
                 tag_count = image.tags.count(tag)
                 moved_tags.extend([tag] * tag_count)
             unmoved_tags = [tag for tag in image.tags if tag not in moved_tags]
             image.tags = moved_tags + unmoved_tags
-            new_caption = self.tag_separator.join(image.tags)
-            if new_caption != old_caption:
-                changed_image_indices.append(image_index)
-                self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            if image.tags != old_tags:
+                changes[image_index] = old_tags
+        self._commit_changes('Move Tags to Front', True, changes)
+
+    def move_tags_to_back(self, tags_to_move: list[str]):
+        changes: dict[int, list[str]] = {}
+        for image_index, image in enumerate(self.images):
+            if not any(tag in image.tags for tag in tags_to_move):
+                continue
+            old_tags = image.tags.copy()
+            moved_tags = []
+            for tag in tags_to_move:
+                tag_count = image.tags.count(tag)
+                moved_tags.extend([tag] * tag_count)
+            unmoved_tags = [tag for tag in image.tags if tag not in moved_tags]
+            image.tags = unmoved_tags + moved_tags
+            if image.tags != old_tags:
+                changes[image_index] = old_tags
+        self._commit_changes('Move Tags to Back', True, changes)
+
+    def insert_trigger_token(self, trigger: str, mode: str = 'first_tag',
+                             scope: Scope | str = Scope.ALL_IMAGES):
+        """Insert a trigger token as first tag or embed into first sentence."""
+        if not trigger.strip():
+            return
+        trigger = trigger.strip()
+        changes: dict[int, list[str]] = {}
+        for image_index, image in enumerate(self.images):
+            if not self.is_image_in_scope(scope, image_index, image):
+                continue
+            if trigger in image.tags or any(trigger in tag for tag in image.tags):
+                continue
+            old_tags = image.tags.copy()
+            if mode == 'embedded':
+                if image.tags:
+                    image.tags[0] = f'{trigger} {image.tags[0]}'
+                else:
+                    image.tags = [trigger]
+            else:
+                image.tags = [trigger] + image.tags
+            changes[image_index] = old_tags
+        self._commit_changes('Insert Trigger Token', True, changes)
+
+    def reorder_illustrious_tags(self, character_tags: set[str] | None = None,
+                                 series_tags: set[str] | None = None,
+                                 do_not_reorder_first_tag: bool = True):
+        """
+        Reorder tags: count → character → series → general.
+        Count tags match patterns like 1girl / 2boys. Character/series sets
+        come from WD category metadata when available.
+        """
+        character_tags = character_tags or set()
+        series_tags = series_tags or set()
+        count_pattern = re.compile(
+            r'^\d+(girl|girls|boy|boys|other|others)$', re.IGNORECASE)
+
+        def sort_key(tag: str) -> tuple[int, str]:
+            if count_pattern.match(tag.replace(' ', '')):
+                return (0, tag)
+            folded = tag.casefold()
+            if folded in character_tags or tag in character_tags:
+                return (1, tag)
+            if folded in series_tags or tag in series_tags:
+                return (2, tag)
+            return (3, tag)
+
+        changes: dict[int, list[str]] = {}
+        for image_index, image in enumerate(self.images):
+            if len(image.tags) < 2:
+                continue
+            old_tags = image.tags.copy()
+            if do_not_reorder_first_tag:
+                first = image.tags[0]
+                rest = sorted(image.tags[1:], key=sort_key)
+                image.tags = [first] + rest
+            else:
+                image.tags = sorted(image.tags, key=sort_key)
+            if image.tags != old_tags:
+                changes[image_index] = old_tags
+        self._commit_changes('Illustrious Tag Order', True, changes)
 
     def remove_duplicate_tags(self) -> int:
-        """
-        Remove duplicate tags for each image. Return the number of removed
-        tags.
-        """
-        self.add_to_undo_stack(action_name='Remove Duplicate Tags',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         removed_tag_count = 0
         for image_index, image in enumerate(self.images):
             tag_count = len(image.tags)
             unique_tag_count = len(set(image.tags))
             if tag_count == unique_tag_count:
                 continue
-            changed_image_indices.append(image_index)
+            old_tags = image.tags.copy()
             removed_tag_count += tag_count - unique_tag_count
-            # Use a dictionary instead of a set to preserve the order.
             image.tags = list(dict.fromkeys(image.tags))
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            changes[image_index] = old_tags
+        self._commit_changes('Remove Duplicate Tags', True, changes)
         return removed_tag_count
 
     def remove_empty_tags(self) -> int:
-        """
-        Remove empty tags (tags that are empty strings or only contain
-        whitespace) for each image. Return the number of removed tags.
-        """
-        self.add_to_undo_stack(action_name='Remove Empty Tags',
-                               should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         removed_tag_count = 0
         for image_index, image in enumerate(self.images):
-            old_tag_count = len(image.tags)
+            old_tags = image.tags.copy()
             image.tags = [tag for tag in image.tags if tag.strip()]
-            new_tag_count = len(image.tags)
-            if old_tag_count == new_tag_count:
-                continue
-            changed_image_indices.append(image_index)
-            removed_tag_count += old_tag_count - new_tag_count
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            removed = len(old_tags) - len(image.tags)
+            if removed:
+                removed_tag_count += removed
+                changes[image_index] = old_tags
+        self._commit_changes('Remove Empty Tags', True, changes)
         return removed_tag_count
 
     def update_image_tags(self, image_index: QModelIndex, tags: list[str]):
@@ -490,20 +627,22 @@ class ImageListModel(QAbstractListModel):
         if image.tags == tags:
             return
         image.tags = tags
+        image.token_count = None
         self.dataChanged.emit(image_index, image_index)
         self.write_image_tags_to_disk(image)
 
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):
-        """Add one or more tags to one or more images."""
         if not image_indices:
             return
         action_name = f'Add {pluralize("Tag", len(tags))}'
         should_ask_for_confirmation = len(image_indices) > 1
-        self.add_to_undo_stack(action_name, should_ask_for_confirmation)
+        rows = [index.row() for index in image_indices]
+        self.add_to_undo_stack(action_name, should_ask_for_confirmation, rows)
         for image_index in image_indices:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
             image.tags.extend(tags)
+            image.token_count = None
             self.write_image_tags_to_disk(image)
         min_image_index = min(image_indices, key=lambda index: index.row())
         max_image_index = max(image_indices, key=lambda index: index.row())
@@ -513,13 +652,11 @@ class ImageListModel(QAbstractListModel):
     def rename_tags(self, old_tags: list[str], new_tag: str,
                     scope: Scope | str = Scope.ALL_IMAGES,
                     use_regex: bool = False):
-        self.add_to_undo_stack(
-            action_name=f'Rename {pluralize("Tag", len(old_tags))}',
-            should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
+            old_image_tags = image.tags.copy()
             if use_regex:
                 pattern = old_tags[0]
                 if not any(re.fullmatch(pattern=pattern, string=image_tag)
@@ -533,23 +670,20 @@ class ImageListModel(QAbstractListModel):
                     continue
                 image.tags = [new_tag if image_tag in old_tags else image_tag
                               for image_tag in image.tags]
-            changed_image_indices.append(image_index)
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            if image.tags != old_image_tags:
+                changes[image_index] = old_image_tags
+        self._commit_changes(
+            f'Rename {pluralize("Tag", len(old_tags))}', True, changes)
 
     @Slot(list)
     def delete_tags(self, tags: list[str],
                     scope: Scope | str = Scope.ALL_IMAGES,
                     use_regex: bool = False):
-        self.add_to_undo_stack(
-            action_name=f'Delete {pluralize("Tag", len(tags))}',
-            should_ask_for_confirmation=True)
-        changed_image_indices = []
+        changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
+            old_image_tags = image.tags.copy()
             if use_regex:
                 pattern = tags[0]
                 if not any(re.fullmatch(pattern=pattern, string=image_tag)
@@ -563,8 +697,34 @@ class ImageListModel(QAbstractListModel):
                     continue
                 image.tags = [image_tag for image_tag in image.tags
                               if image_tag not in tags]
-            changed_image_indices.append(image_index)
-            self.write_image_tags_to_disk(image)
-        if changed_image_indices:
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+            if image.tags != old_image_tags:
+                changes[image_index] = old_image_tags
+        self._commit_changes(
+            f'Delete {pluralize("Tag", len(tags))}', True, changes)
+
+    def export_jsonl(self, destination: Path) -> int:
+        import json
+        lines = []
+        for image in self.images:
+            lines.append(json.dumps({
+                'file_name': image.path.name,
+                'file_path': str(image.path),
+                'text': self.tag_separator.join(image.tags),
+            }, ensure_ascii=False))
+        destination.write_text('\n'.join(lines) + ('\n' if lines else ''),
+                               encoding='utf-8')
+        return len(lines)
+
+    def export_kohya_metadata(self, destination: Path) -> int:
+        import json
+        metadata = {}
+        for image in self.images:
+            key = str(image.path)
+            metadata[key] = {
+                'caption': self.tag_separator.join(image.tags),
+                'tags': image.tags,
+            }
+        destination.write_text(json.dumps(metadata, indent=2,
+                                          ensure_ascii=False),
+                               encoding='utf-8')
+        return len(metadata)

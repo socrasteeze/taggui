@@ -52,17 +52,27 @@ class BatchReorderTagsDialog(QDialog):
         bottom_layout.setContentsMargins(20, 20, 20, 20)
         bottom_layout.setSpacing(20)
         self.move_tags_line_edit = SettingsLineEdit(key='move_to_front_tags')
-        self.move_tags_line_edit.setPlaceholderText('Tags to move to front '
+        self.move_tags_line_edit.setPlaceholderText('Tags to move '
                                                     '(comma-separated)')
         self.move_tags_line_edit.setClearButtonEnabled(True)
         self.move_tags_line_edit.textChanged.connect(
-            lambda: self.move_tags_button.setEnabled(
-                bool(self.move_tags_line_edit.text())))
+            self._update_move_buttons)
         self.move_tags_button = QPushButton('Move Tags to Front')
         self.move_tags_button.setEnabled(False)
         self.move_tags_button.clicked.connect(self.move_tags_to_front)
+        self.move_tags_back_button = QPushButton('Move Tags to Back')
+        self.move_tags_back_button.setEnabled(False)
+        self.move_tags_back_button.clicked.connect(self.move_tags_to_back)
+        illustrious_button = QPushButton('Illustrious Order '
+                                         '(count→char→series→general)')
+        illustrious_button.clicked.connect(
+            lambda: self.image_list_model.reorder_illustrious_tags(
+                do_not_reorder_first_tag=
+                do_not_reorder_first_tag_check_box.isChecked()))
         bottom_layout.addWidget(self.move_tags_line_edit)
         bottom_layout.addWidget(self.move_tags_button)
+        bottom_layout.addWidget(self.move_tags_back_button)
+        bottom_layout.addWidget(illustrious_button)
         layout.addLayout(top_layout)
         layout.addWidget(horizontal_line)
         layout.addLayout(bottom_layout)
@@ -70,8 +80,19 @@ class BatchReorderTagsDialog(QDialog):
         self.move_tags_line_edit.textChanged.emit(
             self.move_tags_line_edit.text())
 
+    def _update_move_buttons(self):
+        enabled = bool(self.move_tags_line_edit.text())
+        self.move_tags_button.setEnabled(enabled)
+        self.move_tags_back_button.setEnabled(enabled)
+
+    def _parsed_move_tags(self) -> list[str]:
+        tags = re.split(r'(?<!\\),', self.move_tags_line_edit.text())
+        return [tag.strip().replace(r'\,', ',') for tag in tags]
+
     @Slot()
     def move_tags_to_front(self):
-        tags = re.split(r'(?<!\\),', self.move_tags_line_edit.text())
-        tags = [tag.strip().replace(r'\,', ',') for tag in tags]
-        self.image_list_model.move_tags_to_front(tags)
+        self.image_list_model.move_tags_to_front(self._parsed_move_tags())
+
+    @Slot()
+    def move_tags_to_back(self):
+        self.image_list_model.move_tags_to_back(self._parsed_move_tags())

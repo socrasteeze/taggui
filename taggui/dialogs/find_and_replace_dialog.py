@@ -1,6 +1,6 @@
 import re
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtWidgets import (QDialog, QGridLayout, QLabel, QPushButton,
                                QVBoxLayout)
 
@@ -39,7 +39,12 @@ class FindAndReplaceDialog(QDialog):
                               Qt.AlignmentFlag.AlignRight)
         self.find_text_line_edit = SettingsLineEdit(key='find_text')
         self.find_text_line_edit.setClearButtonEnabled(True)
-        self.find_text_line_edit.textChanged.connect(self.display_match_count)
+        self._match_count_timer = QTimer(self)
+        self._match_count_timer.setSingleShot(True)
+        self._match_count_timer.setInterval(200)
+        self._match_count_timer.timeout.connect(self.display_match_count)
+        self.find_text_line_edit.textChanged.connect(
+            self._match_count_timer.start)
         grid_layout.addWidget(self.find_text_line_edit, 0, 1)
         self.replace_text_line_edit = SettingsLineEdit(key='replace_text')
         self.replace_text_line_edit.setClearButtonEnabled(True)
@@ -47,16 +52,17 @@ class FindAndReplaceDialog(QDialog):
         self.scope_combo_box = SettingsComboBox(key='replace_scope')
         self.scope_combo_box.addItems(list(Scope))
         self.scope_combo_box.currentTextChanged.connect(
-            self.display_match_count)
+            self._match_count_timer.start)
         grid_layout.addWidget(self.scope_combo_box, 2, 1)
         self.whole_tags_only_check_box = SettingsBigCheckBox(
             key='replace_whole_tags_only', default=False)
         self.whole_tags_only_check_box.stateChanged.connect(
-            self.display_match_count)
+            self._match_count_timer.start)
         grid_layout.addWidget(self.whole_tags_only_check_box, 3, 1)
         self.use_regex_check_box = SettingsBigCheckBox(key='replace_use_regex',
                                                        default=False)
-        self.use_regex_check_box.stateChanged.connect(self.display_match_count)
+        self.use_regex_check_box.stateChanged.connect(
+            self._match_count_timer.start)
         grid_layout.addWidget(self.use_regex_check_box, 4, 1)
         layout.addLayout(grid_layout)
         self.replace_button = QPushButton('Replace')

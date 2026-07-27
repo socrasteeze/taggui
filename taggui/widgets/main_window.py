@@ -1,26 +1,31 @@
 from pathlib import Path
 
-from PySide6.QtCore import QKeyCombination, QModelIndex, QUrl, Qt, Slot
-from PySide6.QtGui import (QAction, QCloseEvent, QDesktopServices, QIcon,
-                           QKeySequence, QPixmap, QShortcut)
+from PySide6.QtCore import (QKeyCombination, QModelIndex, QTimer, QUrl, Qt,
+                            QThread, Signal, Slot)
+from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
+                           QIcon, QKeySequence, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
-                               QMessageBox, QStackedWidget, QVBoxLayout,
-                               QWidget)
-from transformers import AutoTokenizer
+                               QMessageBox, QProgressDialog, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.bucket_calculator_dialog import BucketCalculatorDialog
+from dialogs.caption_stats_dialog import CaptionStatsDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
+from dialogs.trigger_token_dialog import TriggerTokenDialog
 from models.image_list_model import ImageListModel
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
 from utils.big_widgets import BigPushButton
+from utils.caption_profiles import CaptionProfile, get_profile_config
 from utils.image import Image
 from utils.key_press_forwarder import KeyPressForwarder
 from utils.settings import DEFAULT_SETTINGS, get_settings, get_tag_separator
 from utils.shortcut_remover import ShortcutRemover
+from utils.tag_vocab import (TagVocab, download_tag_list, ensure_vocab_file,
+                             get_tags_directory)
 from utils.utils import get_resource_path, pluralize
 from widgets.all_tags_editor import AllTagsEditor
 from widgets.auto_captioner import AutoCaptioner
@@ -33,34 +38,59 @@ GITHUB_REPOSITORY_URL = 'https://github.com/jhc13/taggui'
 TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
 
 
+class TokenizerLoadWorker(QThread):
+    loaded = Signal(object)
+
+    def __init__(self, profile_name: str):
+        super().__init__()
+        self.profile_name = profile_name
+
+    def run(self):
+        from transformers import AutoTokenizer
+        profile = get_profile_config(self.profile_name)
+        try:
+            if profile.encoder.value == 'clip':
+                tokenizer = AutoTokenizer.from_pretrained(
+                    get_resource_path(TOKENIZER_DIRECTORY_PATH))
+            elif profile.encoder.value == 't5':
+                tokenizer = AutoTokenizer.from_pretrained(
+                    'google/t5-v1_1-base')
+            else:
+                # Approximate Qwen token counts with a fast GPT-2 tokenizer
+                # until a dedicated Qwen tokenizer is cached locally.
+                tokenizer = AutoTokenizer.from_pretrained('gpt2')
+        except Exception:
+            tokenizer = AutoTokenizer.from_pretrained(
+                get_resource_path(TOKENIZER_DIRECTORY_PATH))
+        self.loaded.emit(tokenizer)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, app: QApplication):
         super().__init__()
         self.app = app
         self.settings = get_settings()
-        # The path of the currently loaded directory. This is set later when a
-        # directory is loaded.
         self.directory_path = None
+        self._pending_select_index = 0
+        self._load_progress_dialog: QProgressDialog | None = None
+        self.tokenizer = None
+        self._tokenizer_worker: TokenizerLoadWorker | None = None
+        self.vocab = TagVocab()
         image_list_image_width = self.settings.value(
             'image_list_image_width',
             defaultValue=DEFAULT_SETTINGS['image_list_image_width'], type=int)
         tag_separator = get_tag_separator()
         self.image_list_model = ImageListModel(image_list_image_width,
                                                tag_separator)
-        tokenizer = AutoTokenizer.from_pretrained(
-            get_resource_path(TOKENIZER_DIRECTORY_PATH))
         self.proxy_image_list_model = ProxyImageListModel(
-            self.image_list_model, tokenizer, tag_separator)
+            self.image_list_model, None, tag_separator)
         self.image_list_model.proxy_image_list_model = (
             self.proxy_image_list_model)
         self.tag_counter_model = TagCounterModel()
         self.image_tag_list_model = ImageTagListModel()
 
         self.setWindowIcon(QIcon(QPixmap(get_resource_path(ICON_PATH))))
-        # Not setting this results in some ugly colors.
         self.setPalette(self.app.style().standardPalette())
-        # The font size must be set before creating the widgets to ensure that
-        # everything has the correct font size.
         self.set_font_size()
         self.image_viewer = ImageViewer(self.proxy_image_list_model)
         self.create_central_widget()
@@ -70,8 +100,8 @@ class MainWindow(QMainWindow):
                            self.image_list)
         self.image_tags_editor = ImageTagsEditor(
             self.proxy_image_list_model, self.tag_counter_model,
-            self.image_tag_list_model, self.image_list, tokenizer,
-            tag_separator)
+            self.image_tag_list_model, self.image_list, None,
+            tag_separator, self.vocab)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
                            self.image_tags_editor)
         self.all_tags_editor = AllTagsEditor(self.tag_counter_model)
@@ -85,17 +115,12 @@ class MainWindow(QMainWindow):
                            self.auto_captioner)
         self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
         self.all_tags_editor.raise_()
-        # Set default widths for the dock widgets.
-        # Temporarily set a size for the window so that the dock widgets can be
-        # expanded to their default widths. If the window geometry was
-        # previously saved, it will be restored later.
         self.resize(image_list_image_width * 8,
                     int(image_list_image_width * 4.5))
         self.resizeDocks([self.image_list, self.image_tags_editor,
                           self.all_tags_editor],
                          [int(image_list_image_width * 2.5)] * 3,
                          Qt.Orientation.Horizontal)
-        # Disable some widgets until a directory is loaded.
         self.image_tags_editor.tag_input_box.setDisabled(True)
         self.auto_captioner.start_cancel_button.setDisabled(True)
         self.reload_directory_action = QAction('Reload Directory', parent=self)
@@ -114,19 +139,24 @@ class MainWindow(QMainWindow):
                                            .selectionModel())
         self.image_list_model.image_list_selection_model = (
             self.image_list_selection_model)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(200)
+        self._filter_timer.timeout.connect(self.set_image_list_filter)
         self.connect_image_list_signals()
         self.connect_image_tags_editor_signals()
         self.connect_all_tags_editor_signals()
         self.connect_auto_captioner_signals()
-        # Forward any unhandled image changing key presses to the image list.
+        self.image_list_model.load_progress.connect(self._on_load_progress)
+        self.image_list_model.load_finished.connect(self._on_load_finished)
+        self.image_list_model.load_failed.connect(self._on_load_failed)
+
         key_press_forwarder = KeyPressForwarder(
             parent=self, target=self.image_list.list_view,
             keys_to_forward=(Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp,
                              Qt.Key.Key_PageDown, Qt.Key.Key_Home,
                              Qt.Key.Key_End))
         self.installEventFilter(key_press_forwarder)
-        # Remove the Ctrl+Z shortcut from text input boxes to prevent it from
-        # conflicting with the undo action.
         ctrl_z = QKeyCombination(Qt.KeyboardModifier.ControlModifier,
                                  key=Qt.Key.Key_Z)
         ctrl_y = QKeyCombination(Qt.KeyboardModifier.ControlModifier,
@@ -138,7 +168,6 @@ class MainWindow(QMainWindow):
             shortcut_remover)
         self.all_tags_editor.filter_line_edit.installEventFilter(
             shortcut_remover)
-        # Set keyboard shortcuts.
         focus_filter_images_box_shortcut = QShortcut(
             QKeySequence('Alt+F'), self)
         focus_filter_images_box_shortcut.activated.connect(
@@ -178,13 +207,16 @@ class MainWindow(QMainWindow):
             QKeySequence('Ctrl+J'), self)
         jump_to_first_untagged_image_shortcut.activated.connect(
             self.image_list.jump_to_first_untagged_image)
+        self.apply_image_list_view_mode()
+        self.reload_vocab_for_profile()
+        self.start_tokenizer_load()
         self.restore()
         self.image_tags_editor.tag_input_box.setFocus()
 
     def closeEvent(self, event: QCloseEvent):
-        """Save the window geometry and state before closing."""
         self.settings.setValue('geometry', self.saveGeometry())
         self.settings.setValue('window_state', self.saveState())
+        self.image_list_model.tag_writer.flush()
         super().closeEvent(event)
 
     def set_font_size(self):
@@ -196,8 +228,6 @@ class MainWindow(QMainWindow):
 
     def create_central_widget(self):
         central_widget = QStackedWidget()
-        # Put the button inside a widget so that it will not fill up the entire
-        # space.
         load_directory_widget = QWidget()
         load_directory_button = BigPushButton('Load Directory...')
         load_directory_button.clicked.connect(self.select_and_load_directory)
@@ -207,17 +237,73 @@ class MainWindow(QMainWindow):
         central_widget.addWidget(self.image_viewer)
         self.setCentralWidget(central_widget)
 
+    def start_tokenizer_load(self):
+        profile_name = self.settings.value(
+            'caption_profile',
+            defaultValue=DEFAULT_SETTINGS['caption_profile'], type=str)
+        self._tokenizer_worker = TokenizerLoadWorker(profile_name)
+        self._tokenizer_worker.loaded.connect(self._on_tokenizer_loaded)
+        self._tokenizer_worker.start()
+
+    @Slot(object)
+    def _on_tokenizer_loaded(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.proxy_image_list_model.set_tokenizer(tokenizer)
+        self.image_tags_editor.set_tokenizer(tokenizer)
+
+    def reload_vocab_for_profile(self):
+        profile = get_profile_config(self.settings.value(
+            'caption_profile',
+            defaultValue=DEFAULT_SETTINGS['caption_profile'], type=str))
+        self.vocab.clear()
+        if not profile.vocab_csv:
+            return
+        if profile.vocab_csv == 'sdxl_quality.csv':
+            self.vocab.load_builtin_sdxl()
+            return
+        path = ensure_vocab_file(profile.vocab_csv)
+        if path and path.is_file():
+            try:
+                self.vocab.load_csv(path)
+            except Exception as exception:
+                print(f'Failed to load tag vocab {path}: {exception}')
+
     def load_directory(self, path: Path, select_index: int = 0,
                        save_path_to_settings: bool = False):
         self.directory_path = path.resolve()
         if save_path_to_settings:
             self.settings.setValue('directory_path', str(self.directory_path))
         self.setWindowTitle(path.name)
+        self._pending_select_index = select_index
+        self._load_progress_dialog = QProgressDialog(
+            'Loading images...', 'Cancel', 0, 0, self)
+        self._load_progress_dialog.setWindowTitle('Load Directory')
+        self._load_progress_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal)
+        self._load_progress_dialog.setMinimumDuration(0)
+        self._load_progress_dialog.setValue(0)
         self.image_list_model.load_directory(path)
         self.image_list.filter_line_edit.clear()
         self.all_tags_editor.filter_line_edit.clear()
-        # Clear the current index first to make sure that the `currentChanged`
-        # signal is emitted even if the image at the index is already selected.
+
+    @Slot(int, int)
+    def _on_load_progress(self, completed: int, total: int):
+        if self._load_progress_dialog is None:
+            return
+        if self._load_progress_dialog.maximum() != total:
+            self._load_progress_dialog.setMaximum(max(total, 1))
+        self._load_progress_dialog.setValue(completed)
+        self._load_progress_dialog.setLabelText(
+            f'Loading images... {completed}/{total}')
+
+    @Slot()
+    def _on_load_finished(self):
+        if self._load_progress_dialog is not None:
+            self._load_progress_dialog.close()
+            self._load_progress_dialog = None
+        select_index = self._pending_select_index
+        if select_index >= self.proxy_image_list_model.rowCount():
+            select_index = max(self.proxy_image_list_model.rowCount() - 1, 0)
         self.image_list_selection_model.clearCurrentIndex()
         self.image_list.list_view.setCurrentIndex(
             self.proxy_image_list_model.index(select_index, 0))
@@ -225,6 +311,14 @@ class MainWindow(QMainWindow):
         self.reload_directory_action.setDisabled(False)
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
+
+    @Slot(str)
+    def _on_load_failed(self, message: str):
+        if self._load_progress_dialog is not None:
+            self._load_progress_dialog.close()
+            self._load_progress_dialog = None
+        QMessageBox.critical(self, 'Load Directory',
+                             f'Failed to load directory:\n{message}')
 
     @Slot()
     def select_and_load_directory(self):
@@ -240,8 +334,6 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def reload_directory(self):
-        # Save the filter text and the index of the selected image to restore
-        # them after reloading the directory.
         filter_text = self.image_list.filter_line_edit.text()
         select_index_key = ('image_index'
                             if self.proxy_image_list_model.filter is None
@@ -249,17 +341,16 @@ class MainWindow(QMainWindow):
         select_index = self.settings.value(select_index_key, type=int) or 0
         self.load_directory(self.directory_path)
         self.image_list.filter_line_edit.setText(filter_text)
-        # If the selected image index is out of bounds due to images being
-        # deleted, select the last image.
-        if select_index >= self.proxy_image_list_model.rowCount():
-            select_index = self.proxy_image_list_model.rowCount() - 1
-        self.image_list.list_view.setCurrentIndex(
-            self.proxy_image_list_model.index(select_index, 0))
+        self._pending_select_index = select_index
 
     @Slot()
     def show_settings_dialog(self):
         settings_dialog = SettingsDialog(parent=self)
         settings_dialog.exec()
+        self.image_tags_editor.apply_caption_profile()
+        self.reload_vocab_for_profile()
+        self.start_tokenizer_load()
+        self.apply_image_list_view_mode()
 
     @Slot()
     def show_find_and_replace_dialog(self):
@@ -280,6 +371,87 @@ class MainWindow(QMainWindow):
             parent=self, image_list_model=self.image_list_model,
             directory_path=self.directory_path)
         bucket_calculator_dialog.exec()
+
+    @Slot()
+    def show_caption_stats_dialog(self):
+        dialog = CaptionStatsDialog(
+            parent=self, image_list_model=self.image_list_model,
+            tokenizer=self.tokenizer,
+            tag_separator=get_tag_separator())
+        dialog.exec()
+
+    @Slot()
+    def show_trigger_token_dialog(self):
+        dialog = TriggerTokenDialog(parent=self,
+                                    image_list_model=self.image_list_model)
+        dialog.exec()
+
+    @Slot()
+    def reorder_illustrious_tags(self):
+        self.image_list_model.reorder_illustrious_tags()
+
+    @Slot()
+    def export_jsonl(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export JSONL',
+            str((self.directory_path or Path('.')) / 'captions.jsonl'),
+            'JSONL (*.jsonl)')
+        if not path:
+            return
+        count = self.image_list_model.export_jsonl(Path(path))
+        QMessageBox.information(self, 'Export JSONL',
+                                f'Exported {count} captions.')
+
+    @Slot()
+    def export_kohya_metadata(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Kohya Metadata JSON',
+            str((self.directory_path or Path('.')) / 'meta_cap.json'),
+            'JSON (*.json)')
+        if not path:
+            return
+        count = self.image_list_model.export_kohya_metadata(Path(path))
+        QMessageBox.information(self, 'Export Kohya Metadata',
+                                f'Exported metadata for {count} images.')
+
+    @Slot()
+    def update_tag_lists(self):
+        try:
+            downloaded = []
+            for filename in ('danbooru.csv', 'e621.csv'):
+                path = download_tag_list(filename)
+                downloaded.append(str(path))
+            self.reload_vocab_for_profile()
+            QMessageBox.information(
+                self, 'Update Tag Lists',
+                'Downloaded:\n' + '\n'.join(downloaded) +
+                f'\n\nCache: {get_tags_directory()}')
+        except Exception as exception:
+            QMessageBox.critical(self, 'Update Tag Lists',
+                                 f'Failed to update tag lists:\n{exception}')
+
+    @Slot(str)
+    def set_caption_profile(self, profile_name: str):
+        self.settings.setValue('caption_profile', profile_name)
+        self.image_tags_editor.apply_caption_profile()
+        self.reload_vocab_for_profile()
+        self.start_tokenizer_load()
+
+    def apply_image_list_view_mode(self):
+        mode = self.settings.value(
+            'image_list_view_mode',
+            defaultValue=DEFAULT_SETTINGS['image_list_view_mode'], type=str)
+        self.image_list.set_view_mode(mode)
+
+    @Slot()
+    def set_list_view_mode(self):
+        self.settings.setValue('image_list_view_mode', 'list')
+        self.apply_image_list_view_mode()
+
+    @Slot()
+    def set_grid_view_mode(self):
+        self.settings.setValue('image_list_view_mode', 'grid')
+        self.apply_image_list_view_mode()
 
     @Slot()
     def remove_duplicate_tags(self):
@@ -321,6 +493,13 @@ class MainWindow(QMainWindow):
             [QKeySequence('Ctrl+Shift+L'), QKeySequence('F5')])
         self.reload_directory_action.triggered.connect(self.reload_directory)
         file_menu.addAction(self.reload_directory_action)
+        export_jsonl_action = QAction('Export JSONL...', parent=self)
+        export_jsonl_action.triggered.connect(self.export_jsonl)
+        file_menu.addAction(export_jsonl_action)
+        export_kohya_action = QAction('Export Kohya Metadata JSON...',
+                                      parent=self)
+        export_kohya_action.triggered.connect(self.export_kohya_metadata)
+        file_menu.addAction(export_kohya_action)
         settings_action = QAction('Settings...', parent=self)
         settings_action.setShortcut(QKeySequence('Ctrl+Alt+S'))
         settings_action.triggered.connect(self.show_settings_dialog)
@@ -361,6 +540,14 @@ class MainWindow(QMainWindow):
         remove_empty_tags_action.triggered.connect(
             self.remove_empty_tags)
         edit_menu.addAction(remove_empty_tags_action)
+        trigger_action = QAction('Insert Trigger Token...', parent=self)
+        trigger_action.triggered.connect(self.show_trigger_token_dialog)
+        edit_menu.addAction(trigger_action)
+        illustrious_reorder_action = QAction(
+            'Reorder Tags (Illustrious)', parent=self)
+        illustrious_reorder_action.triggered.connect(
+            self.reorder_illustrious_tags)
+        edit_menu.addAction(illustrious_reorder_action)
 
         tools_menu = menu_bar.addMenu('Tools')
         bucket_calculator_action = QAction('Aspect Ratio Bucket Calculator...',
@@ -368,6 +555,28 @@ class MainWindow(QMainWindow):
         bucket_calculator_action.triggered.connect(
             self.show_bucket_calculator_dialog)
         tools_menu.addAction(bucket_calculator_action)
+        stats_action = QAction('Caption Stats...', parent=self)
+        stats_action.triggered.connect(self.show_caption_stats_dialog)
+        tools_menu.addAction(stats_action)
+        update_tags_action = QAction('Update Tag Lists...', parent=self)
+        update_tags_action.triggered.connect(self.update_tag_lists)
+        tools_menu.addAction(update_tags_action)
+
+        profile_menu = tools_menu.addMenu('Caption Profile')
+        profile_group = QActionGroup(self)
+        profile_group.setExclusive(True)
+        current_profile = self.settings.value(
+            'caption_profile',
+            defaultValue=DEFAULT_SETTINGS['caption_profile'], type=str)
+        for profile in CaptionProfile:
+            action = QAction(profile.value, parent=self)
+            action.setCheckable(True)
+            action.setChecked(profile.value == current_profile)
+            action.triggered.connect(
+                lambda checked=False, name=profile.value:
+                self.set_caption_profile(name))
+            profile_group.addAction(action)
+            profile_menu.addAction(action)
 
         view_menu = menu_bar.addMenu('View')
         self.toggle_image_list_action.setCheckable(True)
@@ -386,6 +595,13 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.toggle_image_tags_editor_action)
         view_menu.addAction(self.toggle_all_tags_editor_action)
         view_menu.addAction(self.toggle_auto_captioner_action)
+        view_menu.addSeparator()
+        list_view_action = QAction('Image List View', parent=self)
+        list_view_action.triggered.connect(self.set_list_view_mode)
+        grid_view_action = QAction('Image Grid View', parent=self)
+        grid_view_action.triggered.connect(self.set_grid_view_mode)
+        view_menu.addAction(list_view_action)
+        view_menu.addAction(grid_view_action)
 
         help_menu = menu_bar.addMenu('Help')
         open_github_repository_action = QAction('GitHub', parent=self)
@@ -414,27 +630,21 @@ class MainWindow(QMainWindow):
     def set_image_list_filter(self):
         filter_ = self.image_list.filter_line_edit.parse_filter_text()
         self.proxy_image_list_model.filter = filter_
-        # Apply the new filter.
         self.proxy_image_list_model.invalidateFilter()
         if filter_ is None:
             all_tags_list_selection_model = (self.all_tags_editor
                                              .all_tags_list.selectionModel())
             all_tags_list_selection_model.clearSelection()
-            # Clear the current index.
             self.all_tags_editor.all_tags_list.setCurrentIndex(QModelIndex())
-            # Select the previously selected image in the unfiltered image
-            # list.
             select_index = self.settings.value('image_index', type=int) or 0
             self.image_list.list_view.setCurrentIndex(
                 self.proxy_image_list_model.index(select_index, 0))
         else:
-            # Select the first image.
             self.image_list.list_view.setCurrentIndex(
                 self.proxy_image_list_model.index(0, 0))
 
     @Slot()
     def save_image_index(self, proxy_image_index: QModelIndex):
-        """Save the index of the currently selected image."""
         settings_key = ('image_index'
                         if self.proxy_image_list_model.filter is None
                         else 'filtered_image_index')
@@ -442,7 +652,7 @@ class MainWindow(QMainWindow):
 
     def connect_image_list_signals(self):
         self.image_list.filter_line_edit.textChanged.connect(
-            self.set_image_list_filter)
+            self._filter_timer.start)
         self.image_list_selection_model.currentChanged.connect(
             self.save_image_index)
         self.image_list_selection_model.currentChanged.connect(
@@ -463,8 +673,6 @@ class MainWindow(QMainWindow):
             self.image_tags_editor.reload_image_tags_if_changed)
         self.image_list_model.update_undo_and_redo_actions_requested.connect(
             self.update_undo_and_redo_actions)
-        # Rows are inserted or removed from the proxy image list model when the
-        # filter is changed.
         self.proxy_image_list_model.rowsInserted.connect(
             lambda: self.image_list.update_image_index_label(
                 self.image_list.list_view.currentIndex()))
@@ -475,8 +683,6 @@ class MainWindow(QMainWindow):
             self.reload_directory)
         self.image_list.list_view.tags_paste_requested.connect(
             self.image_list_model.add_tags)
-        # Connecting the signal directly without `isVisible()` causes the menu
-        # item to be unchecked when the widget is an inactive tab.
         self.image_list.visibilityChanged.connect(
             lambda: self.toggle_image_list_action.setChecked(
                 self.image_list.isVisible()))
@@ -484,6 +690,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def update_image_tags(self):
         image_index = self.image_tags_editor.image_index
+        if image_index is None:
+            return
         image: Image = self.image_list_model.data(image_index,
                                                   Qt.ItemDataRole.UserRole)
         old_tags = image.tags
@@ -492,29 +700,33 @@ class MainWindow(QMainWindow):
             return
         old_tags_count = len(old_tags)
         new_tags_count = len(new_tags)
+        row = image_index.row()
         if new_tags_count > old_tags_count:
             self.image_list_model.add_to_undo_stack(
-                action_name='Add Tag', should_ask_for_confirmation=False)
+                action_name='Add Tag', should_ask_for_confirmation=False,
+                image_indices=[row])
         elif new_tags_count == old_tags_count:
             if set(new_tags) == set(old_tags):
                 self.image_list_model.add_to_undo_stack(
                     action_name='Reorder Tags',
-                    should_ask_for_confirmation=False)
+                    should_ask_for_confirmation=False,
+                    image_indices=[row])
             else:
                 self.image_list_model.add_to_undo_stack(
                     action_name='Rename Tag',
-                    should_ask_for_confirmation=False)
+                    should_ask_for_confirmation=False,
+                    image_indices=[row])
         elif old_tags_count - new_tags_count == 1:
             self.image_list_model.add_to_undo_stack(
-                action_name='Delete Tag', should_ask_for_confirmation=False)
+                action_name='Delete Tag', should_ask_for_confirmation=False,
+                image_indices=[row])
         else:
             self.image_list_model.add_to_undo_stack(
-                action_name='Delete Tags', should_ask_for_confirmation=False)
+                action_name='Delete Tags', should_ask_for_confirmation=False,
+                image_indices=[row])
         self.image_list_model.update_image_tags(image_index, new_tags)
 
     def connect_image_tags_editor_signals(self):
-        # `rowsInserted` does not have to be connected because `dataChanged`
-        # is emitted when a tag is added.
         self.image_tag_list_model.modelReset.connect(self.update_image_tags)
         self.image_tag_list_model.dataChanged.connect(self.update_image_tags)
         self.image_tag_list_model.rowsMoved.connect(self.update_image_tags)
@@ -526,10 +738,6 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def set_image_list_filter_text(self, selected_tag: str):
-        """
-        Construct and set the image list filter text from the selected tag in
-        the all tags list.
-        """
         escaped_selected_tag = (selected_tag.replace('\\', '\\\\')
                                 .replace('"', r'\"').replace("'", r"\'"))
         self.image_list.filter_line_edit.setText(
@@ -573,18 +781,15 @@ class MainWindow(QMainWindow):
                 self.auto_captioner.isVisible()))
 
     def restore(self):
-        # Restore the window geometry and state.
         if self.settings.contains('geometry'):
             self.restoreGeometry(self.settings.value('geometry', type=bytes))
         else:
             self.showMaximized()
         self.restoreState(self.settings.value('window_state', type=bytes))
-        # Get the last index of the last selected image.
         if self.settings.contains('image_index'):
             image_index = self.settings.value('image_index', type=int)
         else:
             image_index = 0
-        # Load the last loaded directory.
         if self.settings.contains('directory_path'):
             directory_path = Path(self.settings.value('directory_path',
                                                       type=str))

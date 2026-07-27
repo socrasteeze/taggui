@@ -9,7 +9,12 @@ DEFAULT_SETTINGS = {
     'tag_separator': ',',
     'insert_space_after_tag_separator': True,
     'autocomplete_tags': True,
-    'models_directory_path': ''
+    # dataset_only | dataset_and_vocab | off
+    'autocomplete_mode': 'dataset_and_vocab',
+    'models_directory_path': '',
+    'caption_profile': 'SDXL (general)',
+    'image_list_view_mode': 'list',  # list | grid
+    'trigger_token': '',
 }
 
 

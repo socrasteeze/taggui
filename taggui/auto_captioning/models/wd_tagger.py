@@ -81,13 +81,9 @@ class WdTaggerModel:
                 elif category == '4':
                     self.character_tags_indices.append(index)
 
-    def generate_tags(self, image_array: np.ndarray,
-                      wd_tagger_settings: dict) -> tuple[tuple, tuple]:
-        input_name = self.inference_session.get_inputs()[0].name
-        output_name = self.inference_session.get_outputs()[0].name
-        probabilities = self.inference_session.run(
-            [output_name], {input_name: image_array})[0][0].astype(np.float32)
-        # Exclude the rating tags.
+    def _tags_from_probabilities(
+            self, probabilities: np.ndarray,
+            wd_tagger_settings: dict) -> tuple[tuple, tuple]:
         tags = [tag for index, tag in enumerate(self.tags)
                 if index not in self.rating_tags_indices]
         probabilities = np.array([
@@ -102,7 +98,6 @@ class WdTaggerModel:
                     or tag in tags_to_exclude):
                 continue
             tags_and_probabilities.append((tag, probability))
-        # Sort the tags by probability.
         tags_and_probabilities.sort(key=lambda x: x[1], reverse=True)
         tags_and_probabilities = tags_and_probabilities[
                                  :wd_tagger_settings['max_tags']]
@@ -111,6 +106,32 @@ class WdTaggerModel:
         else:
             tags, probabilities = (), ()
         return tags, probabilities
+
+    def generate_tags(self, image_array: np.ndarray,
+                      wd_tagger_settings: dict) -> tuple[tuple, tuple]:
+        input_name = self.inference_session.get_inputs()[0].name
+        output_name = self.inference_session.get_outputs()[0].name
+        probabilities = self.inference_session.run(
+            [output_name], {input_name: image_array})[0][0].astype(np.float32)
+        return self._tags_from_probabilities(probabilities, wd_tagger_settings)
+
+    def generate_tags_batch(
+            self, image_arrays: list[np.ndarray],
+            wd_tagger_settings: dict) -> list[tuple[tuple, tuple]]:
+        """Run WD inference on a true batch of preprocessed images."""
+        if not image_arrays:
+            return []
+        if len(image_arrays) == 1:
+            return [self.generate_tags(image_arrays[0], wd_tagger_settings)]
+        batch = np.concatenate(image_arrays, axis=0)
+        input_name = self.inference_session.get_inputs()[0].name
+        output_name = self.inference_session.get_outputs()[0].name
+        probabilities_batch = self.inference_session.run(
+            [output_name], {input_name: batch})[0].astype(np.float32)
+        return [
+            self._tags_from_probabilities(probabilities, wd_tagger_settings)
+            for probabilities in probabilities_batch
+        ]
 
 
 class WdTagger(AutoCaptioningModel):
@@ -177,6 +198,18 @@ class WdTagger(AutoCaptioningModel):
                          image_prompt: str) -> tuple[str, str]:
         tags, probabilities = self.model.generate_tags(model_inputs,
                                                        self.wd_tagger_settings)
+        return self._format_caption(tags, probabilities)
+
+    def generate_captions_batch(
+            self, model_inputs_list: list[np.ndarray]
+    ) -> list[tuple[str, str]]:
+        results = self.model.generate_tags_batch(
+            model_inputs_list, self.wd_tagger_settings)
+        return [self._format_caption(tags, probabilities)
+                for tags, probabilities in results]
+
+    def _format_caption(self, tags: tuple, probabilities: tuple
+                        ) -> tuple[str, str]:
         caption = self.thread.tag_separator.join(tags)
         if self.show_probabilities:
             console_output_caption = self.thread.tag_separator.join(
@@ -186,3 +219,11 @@ class WdTagger(AutoCaptioningModel):
         else:
             console_output_caption = caption
         return caption, console_output_caption
+
+    def get_character_and_series_tags(self) -> tuple[set[str], set[str]]:
+        """Expose WD category sets for Illustrious reorder."""
+        characters = {self.model.tags[i]
+                      for i in self.model.character_tags_indices}
+        # WD does not separate series; treat copyright-like unused. Return empty
+        # series set; character tags alone still help Illustrious ordering.
+        return characters, set()

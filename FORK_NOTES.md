@@ -31,23 +31,46 @@ actually landed and where.
   sparse-bucket warnings, plus the optional **Process Images into Buckets**
   action (moves originals to `original_images/`, writes resized+cropped PNGs
   in place, carries `.txt` captions along).
+- `taggui/utils/dimension_cache.py` — disk cache of image dimensions.
+- `taggui/utils/tag_writer.py` — background queue for `.txt` sidecar writes.
+- `taggui/utils/caption_profiles.py` — SDXL / Illustrious / FLUX caption profiles.
+- `taggui/utils/tag_vocab.py` — a1111-format CSV vocab loader + merged completer.
+- `taggui/dialogs/caption_stats_dialog.py` — caption / token / trigger stats.
+- `taggui/dialogs/trigger_token_dialog.py` — insert trigger token tooling.
+- `taggui/auto_captioning/models/qwen3_vl.py` — Qwen3-VL captioner.
 - `FORK_NOTES.md` — this file.
 
 ## Upstream files with fork edits (merge conflicts concentrate here)
 
-- `taggui/widgets/main_window.py` — two small insertions: the
-  `show_bucket_calculator_dialog` slot (+ dialog import) and a new
-  `Tools` menu with the calculator action. Everything else untouched.
-- `taggui/models/image_list_model.py` — directory loading parallelised with a
-  `ThreadPoolExecutor` (`_load_image` extracted); thumbnails downscaled during
-  decode via `QImageReader.setScaledSize`; `BACKUP_DIRECTORY_NAME =
-  'original_images'` excluded from loading (the bucket processor's backup
-  folder must not be re-imported as images).
-- `taggui/models/tag_counter_model.py` — incremental tag counting instead of a
-  full recount on every change.
-- `taggui/auto_captioning/models/wd_tagger.py` — ONNX execution providers
-  chosen by device (`get_onnx_providers`: CUDA / DirectML with CPU fallback)
-  instead of CPU-only.
+- `taggui/widgets/main_window.py` — Tools menu (bucket calculator, caption
+  stats, update tag lists, caption profile submenu); File export actions;
+  Edit trigger / Illustrious reorder; View list/grid; async directory load
+  progress; debounced filter; lazy tokenizer load; vocab wiring.
+- `taggui/models/image_list_model.py` — async directory load worker, dimension
+  cache, background thumbnails, sparse undo diffs, async tag writes, trigger
+  insert, Illustrious reorder, JSONL / Kohya metadata export;
+  `original_images/` exclusion.
+- `taggui/models/proxy_image_list_model.py` — cached `tokens:` filter counts;
+  optional lazy tokenizer.
+- `taggui/models/tag_counter_model.py` — incremental tag counting; `tags`
+  property for vocab completer.
+- `taggui/widgets/image_tags_editor.py` — profile token limits; merged
+  dataset+CSV autocomplete.
+- `taggui/widgets/image_viewer.py` — decoded-image cache on resize.
+- `taggui/widgets/image_list.py` — list/grid view mode.
+- `taggui/widgets/auto_captioner.py` — JoyCaption tag-grounding toggle.
+- `taggui/dialogs/settings_dialog.py` — caption profile + autocomplete mode.
+- `taggui/dialogs/find_and_replace_dialog.py` — debounced match counts.
+- `taggui/dialogs/batch_reorder_tags_dialog.py` — move tags to back;
+  Illustrious order button.
+- `taggui/auto_captioning/captioning_thread.py` — prefetch + WD batching.
+- `taggui/auto_captioning/models/wd_tagger.py` — ONNX GPU providers + batch
+  generate.
+- `taggui/auto_captioning/models/joycaption.py` — tag-grounded prompts.
+- `taggui/auto_captioning/models_list.py` — Qwen3-VL models; roster reorder.
+- `taggui/utils/settings.py` — new defaults (profile, autocomplete mode, etc.).
+- `taggui/utils/image.py` — `token_count` cache field.
+- `requirements.txt` — note on optional `onnxruntime-gpu` / DirectML.
 
 ## Behavioural notes for merges
 
@@ -59,16 +82,21 @@ actually landed and where.
   pre-training prep only; trainers that bucket at load time (ai-toolkit) don't
   need it — treat the dialog as a calculator first (see the stack-wide
   integration plan in lora-dataset-studio's `PLAN.md`, Phase 3).
+- Directory load is async: callers must wait for `load_finished` before
+  selecting rows (main_window handles this).
+- Undo history items are sparse `{index: previous_tags}` dicts, not full
+  dataset snapshots.
 
 ## Merge routine
 
 ```
 git remote add upstream https://github.com/jhc13/taggui   # once
 git fetch upstream && git merge upstream/main
-# expected conflict surface: the four edited files above (fork side is small,
-# well-delimited insertions). Re-run the app afterwards:
+# expected conflict surface: the edited upstream files above.
+# Re-run the app afterwards:
 #   run.bat            (Windows)
 #   python taggui/run_gui.py
-# and sanity-check: directory load, tag editing, WD tagger on GPU,
-# Tools ▸ Aspect Ratio Bucket Calculator.
+# and sanity-check: directory load (progress dialog), tag editing, WD tagger
+# on GPU, Tools ▸ Aspect Ratio Bucket Calculator, caption profile, CSV
+# type-ahead (Tools ▸ Update Tag Lists), export JSONL.
 ```

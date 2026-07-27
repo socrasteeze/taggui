@@ -8,13 +8,13 @@ from transformers import PreTrainedTokenizerBase
 
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
+from utils.caption_profiles import get_profile_config
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
+from utils.tag_vocab import MergedTagCompleterModel, TagVocab
 from utils.text_edit_item_delegate import TextEditItemDelegate
 from utils.utils import get_confirmation_dialog_reply
 from widgets.image_list import ImageList
-
-MAX_TOKEN_COUNT = 75
 
 
 class TagInputBox(QLineEdit):
@@ -22,41 +22,59 @@ class TagInputBox(QLineEdit):
 
     def __init__(self, image_tag_list_model: QStringListModel,
                  tag_counter_model: TagCounterModel, image_list: ImageList,
-                 tag_separator: str):
+                 tag_separator: str, vocab: TagVocab | None = None):
         super().__init__()
         self.image_tag_list_model = image_tag_list_model
         self.image_list = image_list
         self.tag_separator = tag_separator
+        self.vocab = vocab or TagVocab()
+        self.tag_counter_model = tag_counter_model
 
         self.setPlaceholderText('Add Tag')
         self.setStyleSheet('padding: 8px;')
         settings = get_settings()
+        autocomplete_mode = settings.value(
+            'autocomplete_mode',
+            defaultValue=DEFAULT_SETTINGS['autocomplete_mode'], type=str)
         autocomplete_tags = settings.value(
             'autocomplete_tags',
             defaultValue=DEFAULT_SETTINGS['autocomplete_tags'], type=bool)
-        if autocomplete_tags:
-            self.completer = QCompleter(tag_counter_model)
-            self.setCompleter(self.completer)
-            self.completer.activated.connect(lambda text: self.add_tag(text))
-            # Clear the input box after the completer inserts the tag into it.
-            self.completer.activated.connect(
-                lambda: QTimer.singleShot(0, self.clear))
-        else:
+        if autocomplete_mode == 'off' or not autocomplete_tags:
             self.completer = None
+            self.merged_model = None
+            return
+
+        if autocomplete_mode == 'dataset_and_vocab':
+            self.merged_model = MergedTagCompleterModel(
+                tag_counter_model, self.vocab)
+            self.completer = QCompleter(self.merged_model)
+            self.completer.setCompletionMode(
+                QCompleter.CompletionMode.UnfilteredPopupCompletion)
+            self.textChanged.connect(self._update_merged_prefix)
+        else:
+            self.merged_model = None
+            self.completer = QCompleter(tag_counter_model)
+        self.setCompleter(self.completer)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+        self.completer.activated.connect(lambda text: self.add_tag(text))
+        self.completer.activated.connect(
+            lambda: QTimer.singleShot(0, self.clear))
+
+    def _update_merged_prefix(self, text: str):
+        if self.merged_model is not None:
+            self.merged_model.set_prefix(text)
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             super().keyPressEvent(event)
             return
-        # If Ctrl+Enter is pressed and the completer is visible, add the first
-        # tag in the completer popup.
         if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
                 and self.completer is not None
                 and self.completer.popup().isVisible()):
             first_tag = self.completer.popup().model().data(
                 self.completer.model().index(0, 0), Qt.ItemDataRole.EditRole)
             self.add_tag(first_tag)
-        # Otherwise, add the tag in the input box.
         else:
             self.add_tag(self.text())
         self.clear()
@@ -66,11 +84,12 @@ class TagInputBox(QLineEdit):
     def add_tag(self, tag: str):
         if not tag:
             return
+        if self.vocab is not None:
+            tag = self.vocab.resolve(tag)
         tags = tag.split(self.tag_separator)
         selected_image_indices = self.image_list.get_selected_image_indices()
         selected_image_count = len(selected_image_indices)
         if len(tags) == 1 and selected_image_count == 1:
-            # Add an empty tag and set it to the new tag.
             self.image_tag_list_model.insertRow(
                 self.image_tag_list_model.rowCount())
             new_tag_index = self.image_tag_list_model.index(
@@ -103,9 +122,6 @@ class ImageTagsList(QListView):
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
 
     def keyPressEvent(self, event: QKeyEvent):
-        """
-        Delete selected tags when the delete key or backspace key is pressed.
-        """
         if event.key() not in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             super().keyPressEvent(event)
             return
@@ -121,12 +137,9 @@ class ImageTagsList(QListView):
         if min_removed_row < remaining_row_count:
             self.select_tag(min_removed_row)
         elif remaining_row_count:
-            # Select the last tag.
             self.select_tag(remaining_row_count - 1)
 
     def select_tag(self, row: int):
-        # If the current index is not set, using the arrow keys to navigate
-        # through the tags after selecting the tag will not work.
         self.setCurrentIndex(self.image_tag_list_model.index(row))
         self.selectionModel().select(
             self.image_tag_list_model.index(row),
@@ -137,33 +150,34 @@ class ImageTagsEditor(QDockWidget):
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_counter_model: TagCounterModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
-                 tokenizer: PreTrainedTokenizerBase, tag_separator: str):
+                 tokenizer: PreTrainedTokenizerBase | None, tag_separator: str,
+                 vocab: TagVocab | None = None):
         super().__init__()
         self.proxy_image_list_model = proxy_image_list_model
         self.image_tag_list_model = image_tag_list_model
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
+        self.vocab = vocab or TagVocab()
         self.image_index = None
+        self.token_limit = 75
 
-        # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
         self.setWindowTitle('Image Tags')
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
         self.tag_input_box = TagInputBox(self.image_tag_list_model,
                                          tag_counter_model, image_list,
-                                         tag_separator)
+                                         tag_separator, self.vocab)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
         self.token_count_label = QLabel()
-        # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(self.tag_input_box)
         layout.addWidget(self.image_tags_list)
         layout.addWidget(self.token_count_label)
         self.setWidget(container)
+        self.apply_caption_profile()
 
-        # When a tag is added, select it and scroll to the bottom of the list.
         self.image_tag_list_model.rowsInserted.connect(
             lambda _, __, last_index:
             self.image_tags_list.selectionModel().select(
@@ -171,23 +185,38 @@ class ImageTagsEditor(QDockWidget):
                 QItemSelectionModel.SelectionFlag.ClearAndSelect))
         self.image_tag_list_model.rowsInserted.connect(
             self.image_tags_list.scrollToBottom)
-        # `rowsInserted` does not have to be connected because `dataChanged`
-        # is emitted when a tag is added.
         self.image_tag_list_model.modelReset.connect(self.count_tokens)
         self.image_tag_list_model.dataChanged.connect(self.count_tokens)
+
+    def apply_caption_profile(self):
+        settings = get_settings()
+        profile_name = settings.value(
+            'caption_profile',
+            defaultValue=DEFAULT_SETTINGS['caption_profile'], type=str)
+        profile = get_profile_config(profile_name)
+        self.token_limit = profile.token_limit
+        self.count_tokens()
+
+    def set_tokenizer(self, tokenizer: PreTrainedTokenizerBase | None):
+        self.tokenizer = tokenizer
+        self.count_tokens()
 
     @Slot()
     def count_tokens(self):
         caption = self.tag_separator.join(
             self.image_tag_list_model.stringList())
-        # Subtract 2 for the `<|startoftext|>` and `<|endoftext|>` tokens.
-        caption_token_count = len(self.tokenizer(caption).input_ids) - 2
-        if caption_token_count > MAX_TOKEN_COUNT:
+        if self.tokenizer is not None:
+            caption_token_count = len(self.tokenizer(caption).input_ids)
+            if caption_token_count >= 2:
+                caption_token_count -= 2
+        else:
+            caption_token_count = len(caption.split()) if caption else 0
+        if caption_token_count > self.token_limit:
             self.token_count_label.setStyleSheet('color: red;')
         else:
             self.token_count_label.setStyleSheet('')
-        self.token_count_label.setText(f'{caption_token_count} / '
-                                       f'{MAX_TOKEN_COUNT} Tokens')
+        self.token_count_label.setText(
+            f'{caption_token_count} / {self.token_limit} Tokens')
 
     @Slot()
     def select_first_tag(self):
@@ -207,11 +236,8 @@ class ImageTagsEditor(QDockWidget):
             proxy_image_index)
         image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
-        # If the string list already contains the image's tags, do not reload
-        # them. This is the case when the tags are edited directly through the
-        # image tags editor. Removing this check breaks the functionality of
-        # reordering multiple tags at the same time because it gets interrupted
-        # after one tag is moved.
+        if image is None:
+            return
         current_string_list = self.image_tag_list_model.stringList()
         if current_string_list == image.tags:
             return
@@ -223,10 +249,8 @@ class ImageTagsEditor(QDockWidget):
     @Slot()
     def reload_image_tags_if_changed(self, first_changed_index: QModelIndex,
                                      last_changed_index: QModelIndex):
-        """
-        Reload the tags for the current image if its index is in the range of
-        changed indices.
-        """
+        if self.image_index is None:
+            return
         if (first_changed_index.row() <= self.image_index.row()
                 <= last_changed_index.row()):
             proxy_image_index = self.proxy_image_list_model.mapFromSource(

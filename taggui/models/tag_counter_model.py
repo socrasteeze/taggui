@@ -20,6 +20,11 @@ class TagCounterModel(QAbstractListModel):
         # image on every change.
         self.counted_tags = {}
 
+    @property
+    def tags(self):
+        """Alias used by the merged vocab completer."""
+        return self.most_common_tags
+
     def rowCount(self, parent=None) -> int:
         return len(self.most_common_tags)
 

@@ -8,17 +8,29 @@ from auto_captioning.models.llava_next import (LlavaNext34b, LlavaNextMistral,
                                                LlavaNextVicuna)
 from auto_captioning.models.moondream import Moondream1, Moondream2
 from auto_captioning.models.phi_3_vision import Phi3Vision
+from auto_captioning.models.qwen3_vl import Qwen3Vl
 from auto_captioning.models.wd_tagger import WdTagger
 
+# Primary / recommended models first.
 MODELS = [
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
+    'Qwen/Qwen3-VL-2B-Instruct',
+    'Qwen/Qwen3-VL-4B-Instruct',
+    'Qwen/Qwen3-VL-8B-Instruct',
+    'Qwen/Qwen3-VL-30B-A3B-Instruct',
     'microsoft/Florence-2-large-ft',
     'microsoft/Florence-2-large',
     'microsoft/Florence-2-base-ft',
     'microsoft/Florence-2-base',
     'MiaoshouAI/Florence-2-large-PromptGen-v2.0',
     'MiaoshouAI/Florence-2-base-PromptGen-v2.0',
+    'SmilingWolf/wd-eva02-large-tagger-v3',
+    'SmilingWolf/wd-vit-large-tagger-v3',
+    'SmilingWolf/wd-swinv2-tagger-v3',
+    'SmilingWolf/wd-convnext-tagger-v3',
+    'SmilingWolf/wd-vit-tagger-v3',
     'microsoft/Phi-3-vision-128k-instruct',
+    # Legacy (still runnable).
     'llava-hf/llava-v1.6-mistral-7b-hf',
     'llava-hf/llava-v1.6-vicuna-7b-hf',
     'llava-hf/llava-v1.6-vicuna-13b-hf',
@@ -26,11 +38,6 @@ MODELS = [
     'xtuner/llava-llama-3-8b-v1_1-transformers',
     'vikhyatk/moondream2',
     'vikhyatk/moondream1',
-    'SmilingWolf/wd-eva02-large-tagger-v3',
-    'SmilingWolf/wd-vit-large-tagger-v3',
-    'SmilingWolf/wd-swinv2-tagger-v3',
-    'SmilingWolf/wd-convnext-tagger-v3',
-    'SmilingWolf/wd-vit-tagger-v3',
     'SmilingWolf/wd-v1-4-moat-tagger-v2',
     'SmilingWolf/wd-v1-4-swinv2-tagger-v2',
     'SmilingWolf/wd-v1-4-convnext-tagger-v2',
@@ -54,6 +61,8 @@ MODELS = [
 
 def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
     lowercase_model_id = model_id.lower()
+    if 'qwen3-vl' in lowercase_model_id or 'qwen3_vl' in lowercase_model_id:
+        return Qwen3Vl
     if 'florence' in lowercase_model_id:
         if 'promptgen' in lowercase_model_id:
             return Florence2Promptgen

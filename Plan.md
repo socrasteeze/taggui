@@ -36,15 +36,26 @@ WD Tagger v2/v3, LLaVA-era VLMs, BLIP-2/InstructBLIP/Kosmos-2.
   subfolders, transparency flattening, and `foo.jpg`/`foo.png` name-collision
   disambiguation with caption copying.
 
-**Deferred (need a GUI run and/or multi-GB model downloads to verify safely):**
-- WD tagger input batching (3.3) — requires restructuring the per-image
-  captioning loop; the GPU-provider win above is the larger one.
-- Undo-stack per-image diffs (3.4) — touches ~12 mutation methods; needs
-  interactive undo/redo testing before landing.
-- Qwen3-VL / Gemma 4 model additions + transformers bump (2.1, 3.5) — gated
-  on downloading the models and re-verifying every existing captioner.
-- Caption profiles / per-encoder token counter, trigger tooling, JoyCaption
-  tag-grounding, remaining UI debounces (1.x, 3.4 tail).
+**Done (second pass — responsiveness + caption workflow):**
+- ✅ Async directory load with progress dialog + dimension cache
+- ✅ Background thumbnail pool (decode off UI thread)
+- ✅ Sparse undo per-image diffs + async `.txt` writes
+- ✅ Debounced filter / Find & Replace; cached `tokens:`; viewer image cache;
+  lazy tokenizer load
+- ✅ Captioning prefetch + WD true input batching
+- ✅ Caption profiles + per-encoder token limits; CSV vocab type-ahead
+  (a1111 format, Tools ▸ Update Tag Lists)
+- ✅ Qwen3-VL model entries + JoyCaption tag-grounding toggle
+- ✅ Trigger-token tooling + Illustrious reorder
+- ✅ Grid view, JSONL / Kohya metadata export, caption stats panel
+
+**Deferred / verify-on-hardware:**
+- Gemma 4 model addition + transformers bump for full Qwen3-VL runtime
+  validation (2.1, 3.5) — roster entries exist for Qwen3-VL; downloading
+  multi-GB weights and re-checking Florence-2 after a transformers bump
+  still needs a GUI run.
+- Optional `onnxruntime-gpu` install remains a docs/user step (CPU pin kept
+  for compatibility).
 
 ---
 

@@ -2,9 +2,10 @@ from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout)
 
+from utils.caption_profiles import CaptionProfile
 from utils.settings import DEFAULT_SETTINGS, get_settings
-from utils.settings_widgets import (SettingsBigCheckBox, SettingsLineEdit,
-                                    SettingsSpinBox)
+from utils.settings_widgets import (SettingsBigCheckBox, SettingsComboBox,
+                                    SettingsLineEdit, SettingsSpinBox)
 
 
 class SettingsDialog(QDialog):
@@ -29,7 +30,11 @@ class SettingsDialog(QDialog):
                               Qt.AlignmentFlag.AlignRight)
         grid_layout.addWidget(QLabel('Show tag autocomplete suggestions'),
                               5, 0, Qt.AlignmentFlag.AlignRight)
-        grid_layout.addWidget(QLabel('Auto-captioning models directory'), 6, 0,
+        grid_layout.addWidget(QLabel('Autocomplete source'), 6, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Caption profile'), 7, 0,
+                              Qt.AlignmentFlag.AlignRight)
+        grid_layout.addWidget(QLabel('Auto-captioning models directory'), 8, 0,
                               Qt.AlignmentFlag.AlignRight)
 
         font_size_spin_box = SettingsSpinBox(
@@ -64,6 +69,17 @@ class SettingsDialog(QDialog):
             default=DEFAULT_SETTINGS['autocomplete_tags'])
         autocomplete_tags_check_box.stateChanged.connect(
             self.show_restart_warning)
+        autocomplete_mode_combo = SettingsComboBox(
+            key='autocomplete_mode',
+            default=DEFAULT_SETTINGS['autocomplete_mode'])
+        autocomplete_mode_combo.addItems(
+            ['dataset_and_vocab', 'dataset_only', 'off'])
+        autocomplete_mode_combo.currentTextChanged.connect(
+            self.show_restart_warning)
+        caption_profile_combo = SettingsComboBox(
+            key='caption_profile',
+            default=DEFAULT_SETTINGS['caption_profile'])
+        caption_profile_combo.addItems([p.value for p in CaptionProfile])
         self.models_directory_line_edit = SettingsLineEdit(
             key='models_directory_path',
             default=DEFAULT_SETTINGS['models_directory_path'])
@@ -93,9 +109,13 @@ class SettingsDialog(QDialog):
                               4, 1, Qt.AlignmentFlag.AlignLeft)
         grid_layout.addWidget(autocomplete_tags_check_box, 5, 1,
                               Qt.AlignmentFlag.AlignLeft)
-        grid_layout.addWidget(self.models_directory_line_edit, 6, 1,
+        grid_layout.addWidget(autocomplete_mode_combo, 6, 1,
                               Qt.AlignmentFlag.AlignLeft)
-        grid_layout.addWidget(models_directory_button, 7, 1,
+        grid_layout.addWidget(caption_profile_combo, 7, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(self.models_directory_line_edit, 8, 1,
+                              Qt.AlignmentFlag.AlignLeft)
+        grid_layout.addWidget(models_directory_button, 9, 1,
                               Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(grid_layout)
 
