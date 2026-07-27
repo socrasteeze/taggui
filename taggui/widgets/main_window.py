@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow,
 from dialogs.batch_reorder_tags_dialog import BatchReorderTagsDialog
 from dialogs.bucket_calculator_dialog import BucketCalculatorDialog
 from dialogs.caption_stats_dialog import CaptionStatsDialog
+from dialogs.create_shortcut_dialog import CreateShortcutDialog
 from dialogs.find_and_replace_dialog import FindAndReplaceDialog
 from dialogs.settings_dialog import SettingsDialog
 from dialogs.trigger_token_dialog import TriggerTokenDialog
@@ -373,6 +374,11 @@ class MainWindow(QMainWindow):
         bucket_calculator_dialog.exec()
 
     @Slot()
+    def show_create_shortcut_dialog(self):
+        dialog = CreateShortcutDialog(parent=self)
+        dialog.exec()
+
+    @Slot()
     def show_caption_stats_dialog(self):
         dialog = CaptionStatsDialog(
             parent=self, image_list_model=self.image_list_model,
@@ -561,6 +567,11 @@ class MainWindow(QMainWindow):
         update_tags_action = QAction('Update Tag Lists...', parent=self)
         update_tags_action.triggered.connect(self.update_tag_lists)
         tools_menu.addAction(update_tags_action)
+        create_shortcut_action = QAction('Create Desktop Shortcut...',
+                                         parent=self)
+        create_shortcut_action.triggered.connect(
+            self.show_create_shortcut_dialog)
+        tools_menu.addAction(create_shortcut_action)
 
         profile_menu = tools_menu.addMenu('Caption Profile')
         profile_group = QActionGroup(self)

@@ -22,6 +22,8 @@ actually landed and where.
   after a *verified* install so an interrupted one is retried rather than
   silently launching a dependency-less venv, and pauses on every failure path
   so errors stay readable when launched by double-click.
+- `create_shortcut.bat` — one-click Desktop `.lnk` creator (points at
+  `run.bat`, uses `images/icon.ico`).
 - `.gitattributes` — forces CRLF for `.bat` files.
 - `taggui/utils/bucketing.py` — aspect-ratio bucketing math, compatible with
   kohya `make_bucket_resolutions` (step 64, target area, min/max resolution,
@@ -35,17 +37,20 @@ actually landed and where.
 - `taggui/utils/tag_writer.py` — background queue for `.txt` sidecar writes.
 - `taggui/utils/caption_profiles.py` — SDXL / Illustrious / FLUX caption profiles.
 - `taggui/utils/tag_vocab.py` — a1111-format CSV vocab loader + merged completer.
+- `taggui/utils/create_shortcut.py` — Windows `.lnk` helper (WScript.Shell).
 - `taggui/dialogs/caption_stats_dialog.py` — caption / token / trigger stats.
 - `taggui/dialogs/trigger_token_dialog.py` — insert trigger token tooling.
+- `taggui/dialogs/create_shortcut_dialog.py` — Tools ▸ Create Desktop Shortcut.
 - `taggui/auto_captioning/models/qwen3_vl.py` — Qwen3-VL captioner.
 - `FORK_NOTES.md` — this file.
 
 ## Upstream files with fork edits (merge conflicts concentrate here)
 
 - `taggui/widgets/main_window.py` — Tools menu (bucket calculator, caption
-  stats, update tag lists, caption profile submenu); File export actions;
-  Edit trigger / Illustrious reorder; View list/grid; async directory load
-  progress; debounced filter; lazy tokenizer load; vocab wiring.
+  stats, update tag lists, create desktop shortcut, caption profile submenu);
+  File export actions; Edit trigger / Illustrious reorder; View list/grid;
+  async directory load progress; debounced filter; lazy tokenizer load;
+  vocab wiring.
 - `taggui/models/image_list_model.py` — async directory load worker, dimension
   cache, background thumbnails, sparse undo diffs, async tag writes, trigger
   insert, Illustrious reorder, JSONL / Kohya metadata export;
