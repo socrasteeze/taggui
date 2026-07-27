@@ -6,21 +6,45 @@ Cross-platform desktop application for quickly adding and editing image tags
 and captions, aimed towards creators of image datasets for generative AI
 models.
 
+> **This repository** is a personal fork of
+> [jhc13/taggui](https://github.com/jhc13/taggui) with large-dataset speed work,
+> caption profiles, modern captioners, and Windows launch helpers.
+> Full list: [`FORK_CHANGELOG.md`](FORK_CHANGELOG.md). Roadmap: [`Plan.md`](Plan.md).
+
 <img src='images/screenshot-v1.25.0.png' alt='TagGUI screenshot' width='100%'>
 
 ## Features
 
 - Keyboard-friendly interface for fast tagging
-- Tag autocomplete based on your own most-used tags
-- Integrated token counter (for Stable Diffusion)
-- Automatic caption and tag generation
+- Tag autocomplete based on your own most-used tags (optional Danbooru/e621
+  CSV vocab type-ahead in this fork)
+- Integrated token counter (CLIP / profile-aware limits in this fork)
+- Automatic caption and tag generation (includes Qwen3-VL and JoyCaption
+  tag-grounding in this fork)
 - Batch tag operations for renaming, deleting, and sorting tags
 - Advanced image list filtering
+- **This fork also adds:** async directory load, grid view, caption profiles,
+  trigger tooling, bucket calculator, JSONL / Kohya export, caption stats,
+  and a Desktop shortcut creator — see [`FORK_CHANGELOG.md`](FORK_CHANGELOG.md)
 
 ## Installation
 
-The easiest way to use the application is to download the latest release from
-the [releases page](https://www.github.com/jhc13/taggui/releases).
+### Windows (this fork)
+
+1. Install [Python 3.12](https://www.python.org/downloads/) (3.11 also works).
+2. Clone this repository.
+3. Double-click [`run.bat`](run.bat) (first run downloads dependencies,
+   including the large PyTorch CUDA wheel).
+4. Optional: double-click [`create_shortcut.bat`](create_shortcut.bat), or use
+   **Tools → Create Desktop Shortcut…** inside the app.
+
+Later launches skip pip when `venv\installed-requirements.txt` still matches
+`requirements.txt`. Use `run.bat update` to force a reinstall.
+
+### Upstream releases / manual install
+
+The easiest way to use the **upstream** application is to download the latest
+release from the [releases page](https://www.github.com/jhc13/taggui/releases).
 Choose the appropriate file for your operating system, extract it wherever you
 want, and run the executable file inside.
 You may have to install [7-Zip](https://www.7-zip.org/download.html) to

@@ -5,9 +5,11 @@ practices for the models most in use today — **SDXL**, **Illustrious XL**,
 **FLUX.2 Klein 9B**, and **FLUX.1 Krea [dev] / Krea** — and optimize the
 hot paths that slow down large-dataset work.
 
-Current state: v1.34.0, PySide6 app, `.txt` sidecar captions, CLIP-only
-75-token counter, captioner roster centered on JoyCaption Beta One, Florence-2,
-WD Tagger v2/v3, LLaVA-era VLMs, BLIP-2/InstructBLIP/Kosmos-2.
+Current state (this fork): based on v1.34.0 with the landed items in
+**Implementation status** below and the user-facing summary in
+[`FORK_CHANGELOG.md`](FORK_CHANGELOG.md). Upstream still ships CLIP-only
+token counting and an older captioner roster; this fork adds profiles,
+Qwen3-VL entries, CSV type-ahead, and large-dataset responsiveness work.
 
 ---
 
@@ -48,6 +50,13 @@ WD Tagger v2/v3, LLaVA-era VLMs, BLIP-2/InstructBLIP/Kosmos-2.
 - ✅ Qwen3-VL model entries + JoyCaption tag-grounding toggle
 - ✅ Trigger-token tooling + Illustrious reorder
 - ✅ Grid view, JSONL / Kohya metadata export, caption stats panel
+- ✅ Desktop / Start Menu shortcut creator (`create_shortcut.bat` +
+  Tools ▸ Create Desktop Shortcut…)
+- ✅ `run.bat` durable install stamp (`venv\installed-requirements.txt`) so
+  matching requirements skip pip on later launches; legacy dotted stamp
+  migrated automatically
+- ✅ Tag-counter `beginResetModel` / `endResetModel` pairing (fixes proxy
+  “endResetModel without beginResetModel” warnings)
 
 **Deferred / verify-on-hardware:**
 - Gemma 4 model addition + transformers bump for full Qwen3-VL runtime
@@ -56,7 +65,9 @@ WD Tagger v2/v3, LLaVA-era VLMs, BLIP-2/InstructBLIP/Kosmos-2.
   still needs a GUI run.
 - Optional `onnxruntime-gpu` install remains a docs/user step (CPU pin kept
   for compatibility).
+- pixai-tagger-v0.9 (2.1).
 
+See also [`FORK_CHANGELOG.md`](FORK_CHANGELOG.md) for the user-facing summary.
 ---
 
 ## 1. Per-target-model caption alignment

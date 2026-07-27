@@ -14,6 +14,7 @@ actually landed and where.
 ## Fork-only files (no upstream counterpart — merges never touch these)
 
 - `Plan.md` — the modernization roadmap.
+- `FORK_CHANGELOG.md` — user-facing summary of landed fork enhancements.
 - `run.bat` — Windows bootstrap: creates/updates a venv, installs
   `requirements.txt`, pins `HF_HOME` to the local SSD cache, launches the app
   (`run.bat update` / `-u` forces a reinstall). Self-repairing: it pins the
@@ -61,7 +62,9 @@ actually landed and where.
 - `taggui/models/proxy_image_list_model.py` — cached `tokens:` filter counts;
   optional lazy tokenizer.
 - `taggui/models/tag_counter_model.py` — incremental tag counting; `tags`
-  property for vocab completer.
+  property for vocab completer; `beginResetModel` / `endResetModel` pairing.
+- `README.md` — fork banner, Windows `run.bat` install notes, links to
+  `FORK_CHANGELOG.md`.
 - `taggui/widgets/image_tags_editor.py` — profile token limits; merged
   dataset+CSV autocomplete.
 - `taggui/widgets/image_viewer.py` — decoded-image cache on resize.
