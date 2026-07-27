@@ -16,7 +16,12 @@ actually landed and where.
 - `Plan.md` — the modernization roadmap.
 - `run.bat` — Windows bootstrap: creates/updates a venv, installs
   `requirements.txt`, pins `HF_HOME` to the local SSD cache, launches the app
-  (`run.bat update` / `-u` reinstalls deps).
+  (`run.bat update` / `-u` forces a reinstall). Self-repairing: it pins the
+  venv to CPython 3.11/3.12 (the only versions `requirements.txt` has Windows
+  torch wheels for), records a `venv\.installed-requirements.txt` stamp only
+  after a *verified* install so an interrupted one is retried rather than
+  silently launching a dependency-less venv, and pauses on every failure path
+  so errors stay readable when launched by double-click.
 - `.gitattributes` — forces CRLF for `.bat` files.
 - `taggui/utils/bucketing.py` — aspect-ratio bucketing math, compatible with
   kohya `make_bucket_resolutions` (step 64, target area, min/max resolution,
