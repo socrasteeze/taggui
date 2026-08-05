@@ -1,3 +1,4 @@
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -227,3 +228,9 @@ class CaptioningThread(QThread):
 
     def write(self, text: str):
         self.text_outputted.emit(text)
+        # Also mirror the output to the real terminal (not the redirected
+        # `sys.stdout`) so progress is visible from the CLI, not just the
+        # in-app console panel.
+        if sys.__stdout__ is not None:
+            sys.__stdout__.write(text)
+            sys.__stdout__.flush()

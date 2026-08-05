@@ -148,6 +148,7 @@ exit /b 1
 echo Starting TagGUI...
 "%VENV_PY%" taggui\run_gui.py
 if errorlevel 1 goto :app_failed
+echo TagGUI closed.
 endlocal
 exit /b 0
 

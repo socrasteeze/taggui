@@ -40,6 +40,8 @@ def run_gui():
     QImageReader.setAllocationLimit(0)
     main_window = MainWindow(app)
     main_window.show()
+    if sys.stdout is not None:
+        print('TagGUI started. Main window opened.')
     sys.exit(app.exec())
 
 
