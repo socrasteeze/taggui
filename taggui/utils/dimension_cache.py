@@ -14,10 +14,21 @@ def get_cache_path() -> Path:
     return base / 'dimension_cache.json'
 
 
+# Entries are keyed by path, mtime and size, so every edit to an image leaves
+# its old entry behind for good. Above this many, saving keeps only what the
+# current session touched, which bounds both the file and the startup parse.
+MAXIMUM_ENTRY_COUNT = 100_000
+
+
 class DimensionCache:
-    def __init__(self, cache_path: Path | None = None):
+    def __init__(self, cache_path: Path | None = None,
+                 maximum_entry_count: int = MAXIMUM_ENTRY_COUNT):
         self.cache_path = cache_path or get_cache_path()
+        self.maximum_entry_count = maximum_entry_count
         self._data: dict[str, dict] = {}
+        # Keys read or written this session; the ones worth keeping if the
+        # cache has to be pruned.
+        self._used_keys: set[str] = set()
         self._dirty = False
         self.load()
 
@@ -31,7 +42,16 @@ class DimensionCache:
         except (OSError, json.JSONDecodeError):
             self._data = {}
 
+    def prune(self):
+        """Drop entries this session never used, once the cache grows large."""
+        if len(self._data) <= self.maximum_entry_count:
+            return
+        self._data = {key: value for key, value in self._data.items()
+                      if key in self._used_keys}
+        self._dirty = True
+
     def save(self):
+        self.prune()
         if not self._dirty:
             return
         try:
@@ -57,6 +77,7 @@ class DimensionCache:
         entry = self._data.get(key)
         if not entry:
             return None
+        self._used_keys.add(key)
         width = entry.get('w')
         height = entry.get('h')
         if width is None or height is None:
@@ -70,4 +91,5 @@ class DimensionCache:
         if key is None:
             return
         self._data[key] = {'w': dimensions[0], 'h': dimensions[1]}
+        self._used_keys.add(key)
         self._dirty = True

@@ -7,11 +7,14 @@ import numpy as np
 import torch
 from PIL import Image as PilImage
 from PIL.ImageOps import exif_transpose
-from transformers import (AutoModelForVision2Seq, AutoProcessor,
-                          BatchFeature, BitsAndBytesConfig)
+from transformers import AutoProcessor, BatchFeature, BitsAndBytesConfig
 from transformers.utils.import_utils import is_torch_bf16_gpu_available
 
 import auto_captioning.captioning_thread as captioning_thread
+from auto_captioning.transformers_compat import (get_dtype_arguments,
+                                                 get_image_text_model_class,
+                                                 get_version_error_message,
+                                                 is_version_at_least)
 from utils.enums import CaptionDevice
 from utils.image import Image
 
@@ -43,7 +46,14 @@ class AutoCaptioningModel:
     # models that do not have a safetensors version.
     use_safetensors = True
     model_load_context_manager = nullcontext()
-    transformers_model_class = AutoModelForVision2Seq
+    # Left as `None` to resolve the image-text auto class from the installed
+    # transformers release at load time. Subclasses needing a specific class
+    # (a causal LM, a concrete architecture) set it directly.
+    transformers_model_class = None
+    # Set by subclasses whose architecture only exists in newer releases, so
+    # the user gets told what to update instead of a confusing traceback.
+    minimum_transformers_version: str | None = None
+    model_display_name: str | None = None
     image_mode = 'RGB'
 
     def __init__(self,
@@ -85,6 +95,11 @@ class AutoCaptioningModel:
         return None
 
     def get_error_message(self) -> str | None:
+        if (self.minimum_transformers_version
+                and not is_version_at_least(self.minimum_transformers_version)):
+            return get_version_error_message(
+                self.model_display_name or self.model_id,
+                self.minimum_transformers_version)
         if self.forced_words_string.strip() and self.beam_count < 2:
             return ('`Number of beams` must be greater than 1 when `Include '
                     'in caption` is not empty.')
@@ -107,12 +122,16 @@ class AutoCaptioningModel:
             )
             arguments['quantization_config'] = quantization_config
         if self.device.type == 'cuda':
-            arguments['torch_dtype'] = self.dtype
+            # `torch_dtype` on older releases, `dtype` on current ones.
+            arguments.update(get_dtype_arguments(self.dtype))
         return arguments
+
+    def get_transformers_model_class(self):
+        return self.transformers_model_class or get_image_text_model_class()
 
     def load_model(self, model_load_arguments: dict):
         with self.model_load_context_manager:
-            model = self.transformers_model_class.from_pretrained(
+            model = self.get_transformers_model_class().from_pretrained(
                 self.model_id, **model_load_arguments)
         model.eval()
         return model

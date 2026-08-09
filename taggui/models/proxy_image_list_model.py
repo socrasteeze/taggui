@@ -1,11 +1,20 @@
+from __future__ import annotations
+
 import operator
 from fnmatch import fnmatchcase
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
-from transformers import PreTrainedTokenizerBase
 
 from models.image_list_model import ImageListModel
 from utils.image import Image
+from utils.token_counting import count_caption_tokens
+
+if TYPE_CHECKING:
+    # Only needed for type annotations. Importing `transformers` eagerly pulls
+    # in torch, which slows startup and makes this module unusable without the
+    # captioning dependencies installed.
+    from transformers import PreTrainedTokenizerBase
 
 
 class ProxyImageListModel(QSortFilterProxyModel):
@@ -24,28 +33,31 @@ class ProxyImageListModel(QSortFilterProxyModel):
         if source is not None:
             for image in source.images:
                 image.token_count = None
+        if self.filter is not None:
+            # The tokenizer arrives after the window is usable, so a `tokens:`
+            # filter set in the meantime was evaluated against estimates.
+            self.invalidate()
+
+    def _get_caption(self, image: Image) -> str:
+        """
+        The joined caption, cached on the image. A single filter expression
+        asks for it once per term, and the filter runs for every image on
+        every keystroke, so rebuilding it each time is pure waste.
+        """
+        if image.caption is None:
+            image.caption = self.tag_separator.join(image.tags)
+        return image.caption
 
     def _get_token_count(self, image: Image) -> int:
-        if image.token_count is not None:
-            return image.token_count
-        if self.tokenizer is None:
-            # Approximate with whitespace-ish split until tokenizer is ready.
-            caption = self.tag_separator.join(image.tags)
-            image.token_count = max(len(caption.split()), 0)
-            return image.token_count
-        caption = self.tag_separator.join(image.tags)
-        # Subtract 2 for BOS/EOS-style special tokens when present.
-        token_ids = self.tokenizer(caption).input_ids
-        count = len(token_ids)
-        if count >= 2:
-            count -= 2
-        image.token_count = count
-        return count
+        if image.token_count is None:
+            image.token_count = count_caption_tokens(self._get_caption(image),
+                                                     self.tokenizer)
+        return image.token_count
 
     def does_image_match_filter(self, image: Image,
                                 filter_: list | str) -> bool:
         if isinstance(filter_, str):
-            caption = self.tag_separator.join(image.tags)
+            caption = self._get_caption(image)
             return (fnmatchcase(caption, f'*{filter_}*')
                     or fnmatchcase(str(image.path), f'*{filter_}*'))
         if len(filter_) == 1:
@@ -56,8 +68,8 @@ class ProxyImageListModel(QSortFilterProxyModel):
             if filter_[0] == 'tag':
                 return any(fnmatchcase(tag, filter_[1]) for tag in image.tags)
             if filter_[0] == 'caption':
-                caption = self.tag_separator.join(image.tags)
-                return fnmatchcase(caption, f'*{filter_[1]}*')
+                return fnmatchcase(self._get_caption(image),
+                                   f'*{filter_[1]}*')
             if filter_[0] == 'name':
                 return fnmatchcase(image.path.name, f'*{filter_[1]}*')
             if filter_[0] == 'path':
@@ -82,8 +94,7 @@ class ProxyImageListModel(QSortFilterProxyModel):
         if filter_[0] == 'tags':
             number_to_compare = len(image.tags)
         elif filter_[0] == 'chars':
-            caption = self.tag_separator.join(image.tags)
-            number_to_compare = len(caption)
+            number_to_compare = len(self._get_caption(image))
         elif filter_[0] == 'tokens':
             number_to_compare = self._get_token_count(image)
         return comparison_operator(number_to_compare, int(filter_[2]))

@@ -27,6 +27,8 @@ from utils.settings import DEFAULT_SETTINGS, get_settings, get_tag_separator
 from utils.shortcut_remover import ShortcutRemover
 from utils.tag_vocab import (TagVocab, download_tag_list, ensure_vocab_file,
                              get_tags_directory)
+from utils.tokenizers import (ENCODER_TOKENIZER_IDS,
+                              load_tokenizer_for_profile)
 from utils.utils import get_resource_path, pluralize
 from widgets.all_tags_editor import AllTagsEditor
 from widgets.auto_captioner import AutoCaptioner
@@ -36,34 +38,24 @@ from widgets.image_viewer import ImageViewer
 
 ICON_PATH = Path('images/icon.ico')
 GITHUB_REPOSITORY_URL = 'https://github.com/jhc13/taggui'
-TOKENIZER_DIRECTORY_PATH = Path('clip-vit-base-patch32')
 
 
 class TokenizerLoadWorker(QThread):
-    loaded = Signal(object)
+    loaded = Signal(object, bool, str)
 
-    def __init__(self, profile_name: str):
+    def __init__(self, profile_name: str, allow_download: bool = False):
         super().__init__()
         self.profile_name = profile_name
+        self.allow_download = allow_download
 
     def run(self):
-        from transformers import AutoTokenizer
         profile = get_profile_config(self.profile_name)
         try:
-            if profile.encoder.value == 'clip':
-                tokenizer = AutoTokenizer.from_pretrained(
-                    get_resource_path(TOKENIZER_DIRECTORY_PATH))
-            elif profile.encoder.value == 't5':
-                tokenizer = AutoTokenizer.from_pretrained(
-                    'google/t5-v1_1-base')
-            else:
-                # Approximate Qwen token counts with a fast GPT-2 tokenizer
-                # until a dedicated Qwen tokenizer is cached locally.
-                tokenizer = AutoTokenizer.from_pretrained('gpt2')
-        except Exception:
-            tokenizer = AutoTokenizer.from_pretrained(
-                get_resource_path(TOKENIZER_DIRECTORY_PATH))
-        self.loaded.emit(tokenizer)
+            result = load_tokenizer_for_profile(profile, self.allow_download)
+        except Exception as exception:
+            print(f'Failed to load a tokenizer: {exception}')
+            return
+        self.loaded.emit(result.tokenizer, result.is_exact, result.message)
 
 
 class MainWindow(QMainWindow):
@@ -238,19 +230,41 @@ class MainWindow(QMainWindow):
         central_widget.addWidget(self.image_viewer)
         self.setCentralWidget(central_widget)
 
-    def start_tokenizer_load(self):
+    def start_tokenizer_load(self, allow_download: bool = False):
         profile_name = self.settings.value(
             'caption_profile',
             defaultValue=DEFAULT_SETTINGS['caption_profile'], type=str)
-        self._tokenizer_worker = TokenizerLoadWorker(profile_name)
+        self._tokenizer_worker = TokenizerLoadWorker(profile_name,
+                                                     allow_download)
         self._tokenizer_worker.loaded.connect(self._on_tokenizer_loaded)
         self._tokenizer_worker.start()
 
-    @Slot(object)
-    def _on_tokenizer_loaded(self, tokenizer):
+    @Slot(object, bool, str)
+    def _on_tokenizer_loaded(self, tokenizer, is_exact: bool, message: str):
         self.tokenizer = tokenizer
         self.proxy_image_list_model.set_tokenizer(tokenizer)
-        self.image_tags_editor.set_tokenizer(tokenizer)
+        self.image_tags_editor.set_tokenizer(tokenizer, is_exact)
+        if message:
+            print(message)
+
+    @Slot()
+    def download_token_counter(self):
+        """Fetch the current profile's tokenizer so counts stop being estimates."""
+        profile = get_profile_config(self.settings.value(
+            'caption_profile',
+            defaultValue=DEFAULT_SETTINGS['caption_profile'], type=str))
+        if profile.encoder not in ENCODER_TOKENIZER_IDS:
+            QMessageBox.information(
+                self, 'Download Token Counter',
+                f'The {profile.profile.value} profile counts with the '
+                f'built-in CLIP tokenizer; there is nothing to download.')
+            return
+        QMessageBox.information(
+            self, 'Download Token Counter',
+            f'Downloading the {profile.encoder.value} tokenizer for '
+            f'{profile.profile.value}. Token counts will update when it '
+            f'finishes.')
+        self.start_tokenizer_load(allow_download=True)
 
     def reload_vocab_for_profile(self):
         profile = get_profile_config(self.settings.value(
@@ -318,6 +332,19 @@ class MainWindow(QMainWindow):
         self.image_tags_editor.tag_input_box.setDisabled(False)
         self.auto_captioner.start_cancel_button.setDisabled(False)
 
+    @Slot(list)
+    def _on_write_errors(self, paths: list):
+        """Report queued sidecar writes that failed, as one dialog per batch."""
+        if not paths:
+            return
+        shown = [str(path) for path in paths[:10]]
+        if len(paths) > len(shown):
+            shown.append(f'...and {len(paths) - len(shown)} more')
+        QMessageBox.critical(
+            self, 'Error',
+            f'Failed to save tags for {pluralize("file", len(paths))}:\n'
+            + '\n'.join(shown))
+
     @Slot(str)
     def _on_load_failed(self, message: str):
         if self._load_progress_dialog is not None:
@@ -369,6 +396,8 @@ class MainWindow(QMainWindow):
         batch_reorder_tags_dialog = BatchReorderTagsDialog(
             parent=self, image_list_model=self.image_list_model,
             tag_counter_model=self.tag_counter_model)
+        batch_reorder_tags_dialog.reorder_illustrious_requested.connect(
+            self.reorder_illustrious_tags)
         batch_reorder_tags_dialog.exec()
 
     @Slot()
@@ -397,9 +426,34 @@ class MainWindow(QMainWindow):
                                     image_list_model=self.image_list_model)
         dialog.exec()
 
-    @Slot()
-    def reorder_illustrious_tags(self):
-        self.image_list_model.reorder_illustrious_tags()
+    def get_character_and_series_tags(self) -> tuple[set[str], set[str]]:
+        """
+        Character and series tag names from the loaded vocabulary, using the
+        Danbooru category column the a1111 CSV already carries (4 character,
+        3 copyright/series). Empty until a tag list has been downloaded via
+        Tools > Update Tag Lists.
+        """
+        return (self.vocab.get_names_in_categories({4}),
+                self.vocab.get_names_in_categories({3}))
+
+    @Slot(bool)
+    def reorder_illustrious_tags(self, do_not_reorder_first_tag: bool = True):
+        character_tags, series_tags = self.get_character_and_series_tags()
+        if not character_tags and not series_tags:
+            reply = QMessageBox.question(
+                self, 'Illustrious Tag Order',
+                'No tag list is loaded, so character and series tags cannot '
+                'be told apart from general ones. Only count tags such as '
+                '"1girl" will be moved to the front.\n\nDownload a tag list '
+                'with Tools > Update Tag Lists for the full ordering.\n\n'
+                'Reorder anyway?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self.image_list_model.reorder_illustrious_tags(
+            character_tags=character_tags, series_tags=series_tags,
+            do_not_reorder_first_tag=do_not_reorder_first_tag)
 
     @Slot()
     def export_jsonl(self):
@@ -556,8 +610,9 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(trigger_action)
         illustrious_reorder_action = QAction(
             'Reorder Tags (Illustrious)', parent=self)
+        # Wrapped so `triggered`'s checked flag is not taken for the argument.
         illustrious_reorder_action.triggered.connect(
-            self.reorder_illustrious_tags)
+            lambda: self.reorder_illustrious_tags(True))
         edit_menu.addAction(illustrious_reorder_action)
 
         tools_menu = menu_bar.addMenu('Tools')
@@ -572,6 +627,11 @@ class MainWindow(QMainWindow):
         update_tags_action = QAction('Update Tag Lists...', parent=self)
         update_tags_action.triggered.connect(self.update_tag_lists)
         tools_menu.addAction(update_tags_action)
+        download_token_counter_action = QAction('Download Token Counter...',
+                                                parent=self)
+        download_token_counter_action.triggered.connect(
+            self.download_token_counter)
+        tools_menu.addAction(download_token_counter_action)
         create_shortcut_action = QAction('Create Desktop Shortcut...',
                                          parent=self)
         create_shortcut_action.triggered.connect(
@@ -689,6 +749,8 @@ class MainWindow(QMainWindow):
             self.image_tags_editor.reload_image_tags_if_changed)
         self.image_list_model.update_undo_and_redo_actions_requested.connect(
             self.update_undo_and_redo_actions)
+        self.image_list_model.write_errors_occurred.connect(
+            self._on_write_errors)
         self.proxy_image_list_model.rowsInserted.connect(
             lambda: self.image_list.update_image_index_label(
                 self.image_list.list_view.currentIndex()))

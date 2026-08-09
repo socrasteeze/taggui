@@ -1,6 +1,6 @@
 from collections import Counter
 
-from PySide6.QtCore import QAbstractListModel, Qt, Signal, Slot
+from PySide6.QtCore import QAbstractListModel, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import QMessageBox
 
 from utils.image import Image
@@ -19,6 +19,11 @@ class TagCounterModel(QAbstractListModel):
         # that edits can be applied incrementally instead of recounting every
         # image on every change.
         self.counted_tags = {}
+        self._is_publish_pending = False
+        self._publish_timer = QTimer(self)
+        self._publish_timer.setSingleShot(True)
+        self._publish_timer.setInterval(0)
+        self._publish_timer.timeout.connect(self.publish_pending_counts)
 
     @property
     def tags(self):
@@ -78,13 +83,18 @@ class TagCounterModel(QAbstractListModel):
     @Slot()
     def count_tags(self, images: list[Image]):
         """Recount every tag from scratch (used on directory load / reset)."""
+        # `beginResetModel` has to come before the data changes: between the
+        # two calls a view may still read the old contents, and it must never
+        # see new rows under the old row count.
+        self._is_publish_pending = False
+        self._publish_timer.stop()
+        self.beginResetModel()
         self.tag_counter = Counter()
         self.counted_tags = {}
         for image in images:
             self.tag_counter.update(image.tags)
             self.counted_tags[image.path] = list(image.tags)
         self.most_common_tags = self.tag_counter.most_common()
-        self.beginResetModel()
         self.endResetModel()
 
     def update_tag_counts(self, images: list[Image], first_row: int,
@@ -94,22 +104,46 @@ class TagCounterModel(QAbstractListModel):
         range, applying only the difference between each image's previous and
         current tags. This avoids an O(dataset) recount on every edit.
         """
-        changed = False
-        for row in range(first_row, min(last_row, len(images) - 1) + 1):
+        # Find the changed rows before touching anything, so nothing is
+        # published when there is really nothing to apply.
+        changed_rows = [
+            row for row in range(first_row, min(last_row, len(images) - 1) + 1)
+            if self.counted_tags.get(images[row].path, []) != images[row].tags
+        ]
+        if not changed_rows:
+            return
+        for row in changed_rows:
             image = images[row]
             old_tags = self.counted_tags.get(image.path, [])
-            new_tags = image.tags
-            if old_tags == new_tags:
-                continue
-            changed = True
             if old_tags:
                 self.tag_counter.subtract(old_tags)
-            self.tag_counter.update(new_tags)
-            self.counted_tags[image.path] = list(new_tags)
-        if not changed:
+                # Drop tags that fell to zero. Rebuilding the whole Counter
+                # with `+counter` would cost a full copy on every edit.
+                for tag in set(old_tags):
+                    if self.tag_counter[tag] <= 0:
+                        del self.tag_counter[tag]
+            self.tag_counter.update(image.tags)
+            self.counted_tags[image.path] = list(image.tags)
+        self._schedule_publish()
+
+    def _schedule_publish(self):
+        """
+        Ranking every tag and resetting the view is the expensive part, and a
+        batch captioning run reports one changed row at a time. Coalescing on
+        a zero-delay timer turns a run of M edits into one ranking pass once
+        the event loop comes back round, instead of M.
+        """
+        self._is_publish_pending = True
+        if not self._publish_timer.isActive():
+            self._publish_timer.start()
+
+    @Slot()
+    def publish_pending_counts(self):
+        """Apply any coalesced updates now."""
+        if not self._is_publish_pending:
             return
-        # `+ Counter()` drops tags whose count fell to zero or below.
-        self.tag_counter = +self.tag_counter
-        self.most_common_tags = self.tag_counter.most_common()
+        self._is_publish_pending = False
+        self._publish_timer.stop()
         self.beginResetModel()
+        self.most_common_tags = self.tag_counter.most_common()
         self.endResetModel()

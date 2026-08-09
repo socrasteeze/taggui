@@ -19,6 +19,7 @@ from utils.dimension_cache import DimensionCache
 from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.tag_writer import TagWriter
+from utils.thumbnail_cache import ThumbnailCache
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
 UNDO_STACK_SIZE = 32
@@ -176,6 +177,7 @@ class ImageListModel(QAbstractListModel):
     load_finished = Signal()
     load_failed = Signal(str)
     thumbnail_ready = Signal(int, str, QImage)
+    write_errors_occurred = Signal(list)
 
     def __init__(self, image_list_image_width: int, tag_separator: str):
         super().__init__()
@@ -188,8 +190,10 @@ class ImageListModel(QAbstractListModel):
         self.image_list_selection_model = None
         self.dimension_cache = DimensionCache()
         self.tag_writer = TagWriter()
+        self.tag_writer.errors_occurred.connect(self.write_errors_occurred)
         self._load_worker: DirectoryLoadWorker | None = None
         self._thumbnail_pool = QThreadPool.globalInstance()
+        self.thumbnail_cache = ThumbnailCache()
         self._pending_thumbnails: set[int] = set()
         self.thumbnail_ready.connect(self._on_thumbnail_ready)
 
@@ -207,8 +211,9 @@ class ImageListModel(QAbstractListModel):
                 text += f'\n{caption}'
             return text
         if role == Qt.ItemDataRole.DecorationRole:
-            if image.thumbnail:
-                return image.thumbnail
+            thumbnail = self.thumbnail_cache.get(image.path)
+            if thumbnail is not None:
+                return thumbnail
             row = index.row()
             if row not in self._pending_thumbnails:
                 self._pending_thumbnails.add(row)
@@ -217,8 +222,9 @@ class ImageListModel(QAbstractListModel):
                 self._thumbnail_pool.start(task)
             return QIcon()
         if role == Qt.ItemDataRole.SizeHintRole:
-            if image.thumbnail:
-                sizes = image.thumbnail.availableSizes()
+            thumbnail = self.thumbnail_cache.get(image.path)
+            if thumbnail is not None:
+                sizes = thumbnail.availableSizes()
                 if sizes:
                     return sizes[0]
             dimensions = image.dimensions
@@ -239,7 +245,8 @@ class ImageListModel(QAbstractListModel):
             return
         if qimage.isNull():
             return
-        image.thumbnail = QIcon(QPixmap.fromImage(qimage))
+        self.thumbnail_cache.set(image.path,
+                                 QIcon(QPixmap.fromImage(qimage)))
         model_index = self.index(row)
         self.dataChanged.emit(model_index, model_index,
                               [Qt.ItemDataRole.DecorationRole,
@@ -255,6 +262,7 @@ class ImageListModel(QAbstractListModel):
         self.undo_stack.clear()
         self.redo_stack.clear()
         self._pending_thumbnails.clear()
+        self.thumbnail_cache.clear()
         self.update_undo_and_redo_actions_requested.emit()
         settings = get_settings()
         image_suffixes_string = settings.value(
@@ -313,22 +321,36 @@ class ImageListModel(QAbstractListModel):
         changed_indices = sorted(changes)
         for image_index in changed_indices:
             image = self.images[image_index]
-            image.token_count = None
+            image.invalidate_caches()
             self.write_image_tags_to_disk(image)
-        self.dataChanged.emit(self.index(changed_indices[0]),
-                              self.index(changed_indices[-1]))
+        self.emit_data_changed_for_rows(changed_indices)
+
+    def emit_data_changed_for_rows(self, rows: list[int]):
+        """
+        Signal the changed rows as contiguous runs. A single span from the
+        first to the last row would mark everything between them as changed
+        too - editing rows 0 and 9999 of a large dataset would tell every
+        connected view that all ten thousand rows need re-examining.
+        """
+        if not rows:
+            return
+        rows = sorted(rows)
+        run_start = previous = rows[0]
+        for row in rows[1:]:
+            if row == previous + 1:
+                previous = row
+                continue
+            self.dataChanged.emit(self.index(run_start), self.index(previous))
+            run_start = previous = row
+        self.dataChanged.emit(self.index(run_start), self.index(previous))
 
     def write_image_tags_to_disk(self, image: Image):
+        # Writes are queued, so failures are not known yet. `TagWriter` reports
+        # them through `write_errors_occurred` once the queue drains, which
+        # keeps a failing batch to one report naming the files that failed
+        # rather than a modal dialog per image, attributed to the wrong one.
         text = self.tag_separator.join(image.tags)
         self.tag_writer.enqueue(image.path.with_suffix('.txt'), text)
-        errors = self.tag_writer.pop_errors()
-        if errors:
-            error_message_box = QMessageBox()
-            error_message_box.setWindowTitle('Error')
-            error_message_box.setIcon(QMessageBox.Icon.Critical)
-            error_message_box.setText(
-                f'Failed to save tags for {errors[0]}.')
-            error_message_box.exec()
 
     def restore_history_tags(self, is_undo: bool):
         if is_undo:
@@ -360,15 +382,12 @@ class ImageListModel(QAbstractListModel):
             redo_previous[image_index] = image.tags.copy()
             changed_image_indices.append(image_index)
             image.tags = history_image_tags.copy()
-            image.token_count = None
+            image.invalidate_caches()
             self.write_image_tags_to_disk(image)
         destination_stack.append(HistoryItem(
             history_item.action_name, redo_previous,
             history_item.should_ask_for_confirmation))
-        if changed_image_indices:
-            changed_image_indices.sort()
-            self.dataChanged.emit(self.index(changed_image_indices[0]),
-                                  self.index(changed_image_indices[-1]))
+        self.emit_data_changed_for_rows(changed_image_indices)
         self.update_undo_and_redo_actions_requested.emit()
 
     @Slot()
@@ -539,11 +558,20 @@ class ImageListModel(QAbstractListModel):
         if not trigger.strip():
             return
         trigger = trigger.strip()
+        # Match the trigger as a whole tag or a whole word inside one. A
+        # substring test would treat "masks" as already carrying the trigger
+        # "sks" and silently skip the image.
+        trigger_pattern = re.compile(rf'(?<!\w){re.escape(trigger)}(?!\w)')
+
+        def has_trigger(tags: list[str]) -> bool:
+            return any(tag == trigger or trigger_pattern.search(tag)
+                       for tag in tags)
+
         changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
             if not self.is_image_in_scope(scope, image_index, image):
                 continue
-            if trigger in image.tags or any(trigger in tag for tag in image.tags):
+            if has_trigger(image.tags):
                 continue
             old_tags = image.tags.copy()
             if mode == 'embedded':
@@ -564,20 +592,26 @@ class ImageListModel(QAbstractListModel):
         Count tags match patterns like 1girl / 2boys. Character/series sets
         come from WD category metadata when available.
         """
-        character_tags = character_tags or set()
-        series_tags = series_tags or set()
+        character_tags = {tag.casefold() for tag in (character_tags or set())}
+        series_tags = {tag.casefold() for tag in (series_tags or set())}
         count_pattern = re.compile(
             r'^\d+(girl|girls|boy|boys|other|others)$', re.IGNORECASE)
 
-        def sort_key(tag: str) -> tuple[int, str]:
+        def category_rank(tag: str) -> int:
             if count_pattern.match(tag.replace(' ', '')):
-                return (0, tag)
+                return 0
             folded = tag.casefold()
-            if folded in character_tags or tag in character_tags:
-                return (1, tag)
-            if folded in series_tags or tag in series_tags:
-                return (2, tag)
-            return (3, tag)
+            if folded in character_tags:
+                return 1
+            if folded in series_tags:
+                return 2
+            return 3
+
+        def reorder(tags: list[str]) -> list[str]:
+            # Sort on the rank alone. Python's sort is stable, so tags within a
+            # category keep the order they arrived in - which for tagger output
+            # is descending confidence, and that ordering matters for training.
+            return sorted(tags, key=category_rank)
 
         changes: dict[int, list[str]] = {}
         for image_index, image in enumerate(self.images):
@@ -585,11 +619,9 @@ class ImageListModel(QAbstractListModel):
                 continue
             old_tags = image.tags.copy()
             if do_not_reorder_first_tag:
-                first = image.tags[0]
-                rest = sorted(image.tags[1:], key=sort_key)
-                image.tags = [first] + rest
+                image.tags = [image.tags[0]] + reorder(image.tags[1:])
             else:
-                image.tags = sorted(image.tags, key=sort_key)
+                image.tags = reorder(image.tags)
             if image.tags != old_tags:
                 changes[image_index] = old_tags
         self._commit_changes('Illustrious Tag Order', True, changes)
@@ -627,7 +659,7 @@ class ImageListModel(QAbstractListModel):
         if image.tags == tags:
             return
         image.tags = tags
-        image.token_count = None
+        image.invalidate_caches()
         self.dataChanged.emit(image_index, image_index)
         self.write_image_tags_to_disk(image)
 
@@ -642,11 +674,9 @@ class ImageListModel(QAbstractListModel):
         for image_index in image_indices:
             image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
             image.tags.extend(tags)
-            image.token_count = None
+            image.invalidate_caches()
             self.write_image_tags_to_disk(image)
-        min_image_index = min(image_indices, key=lambda index: index.row())
-        max_image_index = max(image_indices, key=lambda index: index.row())
-        self.dataChanged.emit(min_image_index, max_image_index)
+        self.emit_data_changed_for_rows(rows)
 
     @Slot(list, str)
     def rename_tags(self, old_tags: list[str], new_tag: str,

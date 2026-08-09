@@ -1,6 +1,6 @@
 import re
 
-from PySide6.QtCore import Slot
+from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QPushButton, QVBoxLayout
 
 from models.image_list_model import ImageListModel
@@ -10,6 +10,8 @@ from widgets.auto_captioner import HorizontalLine
 
 
 class BatchReorderTagsDialog(QDialog):
+    reorder_illustrious_requested = Signal(bool)
+
     def __init__(self, parent, image_list_model: ImageListModel,
                  tag_counter_model: TagCounterModel):
         super().__init__(parent)
@@ -65,9 +67,11 @@ class BatchReorderTagsDialog(QDialog):
         self.move_tags_back_button.clicked.connect(self.move_tags_to_back)
         illustrious_button = QPushButton('Illustrious Order '
                                          '(count→char→series→general)')
+        # Routed through the window so the reorder gets the character and
+        # series tags from the loaded vocabulary; without them it can only
+        # promote count tags.
         illustrious_button.clicked.connect(
-            lambda: self.image_list_model.reorder_illustrious_tags(
-                do_not_reorder_first_tag=
+            lambda: self.reorder_illustrious_requested.emit(
                 do_not_reorder_first_tag_check_box.isChecked()))
         bottom_layout.addWidget(self.move_tags_line_edit)
         bottom_layout.addWidget(self.move_tags_button)

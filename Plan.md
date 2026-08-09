@@ -15,6 +15,42 @@ Qwen3-VL entries, CSV type-ahead, and large-dataset responsiveness work.
 
 ## Implementation status
 
+Status here is checked against the code, and where a claim is testable it is
+covered by `tests/` (run `pytest`; see [Verification](#verification)). Items
+that cannot be verified without a GPU and model weights are called out as
+**verify-on-hardware** rather than listed as done.
+
+**Done (third pass — reconciliation, correctness, optimization):**
+- ✅ Test suite + CI (`tests/`, `.github/workflows/tests.yml`) — headless,
+  no torch, covers bucketing, caption profiles, tag vocab, dimension cache,
+  tokenizers, the transformers shim, the roster, and the Qt models.
+- ✅ transformers compatibility layer (`auto_captioning/transformers_compat.py`)
+  — resolves the image-text auto class, the dtype load-argument name, and a
+  per-model minimum version, so the pin selects what is *tested* rather than
+  what the code is welded to. `AutoModelForVision2Seq` is gone in transformers
+  5.x, so this is what keeps the captioner package importable there.
+- ✅ transformers bumped to **4.57.6** (last 4.x; first release carrying
+  `qwen3_vl` and `qwen3_vl_moe`). Qwen3-VL entries are now actually loadable.
+- ✅ Per-profile tokenizers (`utils/tokenizers.py`) — cached like tag
+  vocabularies, with Tools ▸ *Download Token Counter*. A fallback count is
+  labelled approximate instead of passing CLIP off as T5/Qwen3.
+- ✅ Illustrious ordering wired to real category data (a1111 `danbooru.csv`
+  categories 4 character / 3 series), replacing the unused, series-blind WD
+  helper. Ordering within a category is now stable, preserving tagger
+  confidence order.
+- ✅ Legacy roster demotion — two named groups with an unselectable heading.
+- ✅ Gemma 4 and pixai-tagger entries; tagger batch size is a setting.
+- ✅ pixai-tagger implemented against its real contract (2.1) — its own
+  inference path, `preprocess.json` interpreter and per-category thresholds,
+  rather than the WD image path, which would have produced wrong tags silently.
+- ✅ Lazy model-class imports — torch is no longer loaded to draw a combo box.
+- ✅ Correctness fixes: trigger-token whole-word matching, aggregated async
+  write-error reporting, encoder-derived special-token overhead,
+  `beginResetModel` ordering, one-character vocab autocomplete.
+- ✅ Optimization: bounded thumbnail cache, contiguous-run `dataChanged`,
+  coalesced tag-count publishing, cached filter captions, pruned dimension
+  cache.
+
 **Done (first pass — pure-code optimizations + bucket calculator):**
 - ✅ WD tagger GPU inference (3.1) — `wd_tagger.py` now selects CUDA/DirectML
   ONNX providers based on the chosen device, falling back to CPU cleanly when
@@ -27,8 +63,9 @@ Qwen3-VL entries, CSV type-ahead, and large-dataset responsiveness work.
 - ✅ Thumbnail decode (3.4) — thumbnails are downsampled during decode via
   `QImageReader.setScaledSize` instead of decoding at full resolution.
 - ✅ Aspect-ratio bucket calculator **and processor** (4) — new
-  `utils/bucketing.py` (kohya-compatible, unit-tested: 1920×1080 → 1344×768 at
-  1024 area) plus a Tools ▸ *Aspect Ratio Bucket Calculator* dialog showing the
+  `utils/bucketing.py` (kohya-compatible; 1920×1080 → 1344×768 at 1024 area,
+  now covered by `tests/test_bucketing.py`) plus a Tools ▸ *Aspect Ratio
+  Bucket Calculator* dialog showing the
   bucket distribution and upscale/heavy-crop/sparse-bucket warnings. The
   *Process Images into Buckets* button moves every original into an
   `original_images` backup folder (preserving subfolder structure) and writes
@@ -46,9 +83,12 @@ Qwen3-VL entries, CSV type-ahead, and large-dataset responsiveness work.
   lazy tokenizer load
 - ✅ Captioning prefetch + WD true input batching
 - ✅ Caption profiles + per-encoder token limits; CSV vocab type-ahead
-  (a1111 format, Tools ▸ Update Tag Lists)
-- ✅ Qwen3-VL model entries + JoyCaption tag-grounding toggle
-- ✅ Trigger-token tooling + Illustrious reorder
+  (a1111 format, Tools ▸ Update Tag Lists) — the matching *tokenizers* landed
+  in the third pass
+- ✅ Qwen3-VL model entries + JoyCaption tag-grounding toggle — the entries
+  only became loadable with the third pass's transformers bump
+- ✅ Trigger-token tooling + Illustrious reorder — both had defects fixed in
+  the third pass
 - ✅ Grid view, JSONL / Kohya metadata export, caption stats panel
 - ✅ Desktop / Start Menu shortcut creator (`create_shortcut.bat` +
   Tools ▸ Create Desktop Shortcut…)
@@ -58,16 +98,51 @@ Qwen3-VL entries, CSV type-ahead, and large-dataset responsiveness work.
 - ✅ Tag-counter `beginResetModel` / `endResetModel` pairing (fixes proxy
   “endResetModel without beginResetModel” warnings)
 
-**Deferred / verify-on-hardware:**
-- Gemma 4 model addition + transformers bump for full Qwen3-VL runtime
-  validation (2.1, 3.5) — roster entries exist for Qwen3-VL; downloading
-  multi-GB weights and re-checking Florence-2 after a transformers bump
-  still needs a GUI run.
-- Optional `onnxruntime-gpu` install remains a docs/user step (CPU pin kept
-  for compatibility).
-- pixai-tagger-v0.9 (2.1).
+**Verify-on-hardware (code is in; real weights have never been loaded):**
+- Every captioner run under transformers 4.57.6 — Qwen3-VL end to end, and
+  Florence-2 / Phi-3-Vision / Moondream, which use `trust_remote_code` and are
+  the usual breakage point after a bump.
+- **Gemma 4** needs `transformers>=5.5`, so it cannot run on the 4.57.6 pin.
+  The entry is present and reports that until the pin is raised. Raising it is
+  a real tradeoff: on 5.x, Florence-2 becomes natively supported (no remote
+  code), while Phi-3-Vision and Moondream still depend on remote code written
+  against the 4.x API.
+- **pixai-tagger-v0.9** — the file layout and inference contract are now known
+  (see §2.1), and everything except the weights themselves is covered by
+  tests. What is unverified is only whether the real `preprocess.json` uses a
+  stage outside the eight implemented; if it does, the error names the stage.
+- WD true batching against a real ONNX export — the batch size is now a
+  setting, clamped when the model's batch dimension is static.
+- Optional `onnxruntime-gpu` / DirectML install remains a user step, now
+  documented in the README.
+
+**Known non-goals for now:**
+- transformers 5.x as the pinned default. The shim already supports it; what
+  is missing is a hardware pass over the remote-code captioners.
 
 See also [`FORK_CHANGELOG.md`](FORK_CHANGELOG.md) for the user-facing summary.
+
+## Verification
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+Runs headless (offscreen Qt), needs no GPU and no torch, and covers the
+pure-logic modules, the Qt models and the tagger inference paths (with a faked
+ONNX session). CI runs the same suite on every push. Anything involving real
+model weights is verify-on-hardware and is listed as such above rather than
+being claimed as done.
+
+`utils/onnx_preprocess.py` reimplements deepghs's preprocessing spec, where a
+mistake yields wrong tags rather than an error. It was checked by running both
+implementations over the same images and pipelines and comparing the arrays
+exactly — 53 comparisons, no divergence, against dghs-imgutils 0.19.0. Re-run
+`tools/differential_preprocess_check.py` after changing that module; it is not
+part of the suite because the reference's dependency tree is larger than
+taggui's own.
+
 ---
 
 ## 1. Per-target-model caption alignment
@@ -86,54 +161,71 @@ counting, autocompletion behavior, and captioning presets:
 | FLUX.2 Klein 9B | Rich natural-language sentences/paragraph | 512 (Qwen3 embedder) | Style LoRAs: describe content only, never the style; trigger = rare made-up token embedded in the sentence |
 | FLUX.1 Krea [dev] | 1–3 descriptive NL sentences | 512 (T5) | Standard FLUX.1 practice; captionless runs are a valid alternative for single-concept LoRAs |
 
-### 1.2 Token counter per encoder
-`widgets/image_tags_editor.py` hardcodes `MAX_TOKEN_COUNT = 75` with the CLIP
-ViT-B/32 tokenizer. Make the limit and tokenizer follow the caption profile:
-- CLIP (75) for SDXL/Illustrious.
-- T5 (512) for FLUX.1/Krea.
-- Qwen3 (512) for FLUX.2 Klein.
-Show `n / limit` and color-code accordingly; keep CLIP as the default.
+### 1.2 Token counter per encoder — done
+Both the limit and the tokenizer follow the caption profile: CLIP (75) for
+SDXL/Illustrious, T5 (512) for FLUX.1/Krea, Qwen3 (512) for FLUX.2 Klein.
+CLIP ships with the app; the others are fetched once into the app data
+directory (Tools ▸ *Download Token Counter*) and cached. Until one is
+available the count is shown as `~n / limit` with a tooltip, rather than
+presenting a CLIP number as if it came from the profile's encoder. The
+special-token overhead is measured from each tokenizer instead of assuming
+CLIP's two.
 
-### 1.3 Trigger-token tooling
+### 1.3 Trigger-token tooling — done
 - "Insert trigger token" batch action with two placement modes: **first tag**
   (SDXL/Illustrious, pairs with kohya `keep_tokens`) and **embedded in
-  sentence** (FLUX-family).
-- Validate trigger consistency across the dataset (filterable: images missing
-  the trigger).
+  sentence** (FLUX-family). An image already carrying the trigger is skipped
+  on a whole-word match, so a trigger like `sks` is no longer considered
+  present because the image is tagged `masks`.
+- Still open: dataset-wide trigger consistency as a filter term (images
+  missing the trigger). The caption stats panel reports the percentage.
 
-### 1.4 Illustrious tag-order support
-- Batch reorder mode implementing the booru convention: count tag → character
-  → series → general tags, using the WD tagger's category metadata (it already
-  distinguishes rating/character/general).
-- Optional prepend/strip of quality (`masterpiece, best quality`) and rating
-  (`safe`/`sensitive`/`nsfw`/`explicit`) tags — guides differ on whether to
-  include these in training captions, so make it a toggle, off by default.
+### 1.4 Illustrious tag-order support — done
+- Batch reorder implementing the booru convention: count tag → character →
+  series → general. Categories come from the a1111 `danbooru.csv` the fork
+  already downloads (4 character, 3 copyright/series) — **not** from the WD
+  tagger, which has no series category at all. Order within a category is
+  preserved, so tagger confidence ordering survives the reorder. With no tag
+  list downloaded, the action says what it will not be able to do.
+- Still open: optional prepend/strip of quality (`masterpiece, best quality`)
+  and rating (`safe`/`sensitive`/`nsfw`/`explicit`) tags — guides differ on
+  whether to include these in training captions, so make it a toggle, off by
+  default.
 
 ## 2. Auto-captioning model roster
 
-### 2.1 Add
-- **Qwen3-VL Instruct (2B/4B/8B, and 30B-A3B)** — the current community
+### 2.1 Add — all listed; runtime verification varies
+- ✅ **Qwen3-VL Instruct (2B/4B/8B, and 30B-A3B)** — the current community
   favorite for NL captions. The small dense variants cover low-VRAM setups;
   **Qwen3-VL-30B-A3B** (MoE, 30B total / 3B active per token) is the quality
   pick — near-flagship captions at moderate inference cost, and it quantizes
-  well (4-bit fits in ~20 GB). Highest-value addition.
-- **Gemma 4 31B IT** (Google, Mar 2026, Apache 2.0) — flagship dense
-  open-weights VLM built from Gemini 3 research; strong detailed captioning
-  with variable aspect-ratio image input. Heavier than Qwen3-VL-30B-A3B (all
-  31B params are dense), so it wants 4-bit on consumer GPUs; offer it
-  alongside Qwen3-VL as the two "high quality" captioners. The smaller
-  Gemma 4 E4B is a candidate for the low-VRAM tier.
-- **pixai-tagger-v0.9** — newer Danbooru snapshot than WD v3, better recall
-  and newer character coverage; complements wd-eva02-large-tagger-v3.
-- **JoyCaption tag-grounded mode** — Beta One accepts WD tags as input to
-  ground its NL caption. TagGUI already has both pieces; wire the image's
-  existing tags into the JoyCaption prompt as an option. This is the current
-  best hybrid tags+NL mechanism.
+  well (4-bit fits in ~20 GB). Runnable as of the 4.57.6 pin; a real run is
+  verify-on-hardware.
+- ⚠️ **Gemma 4** — listed (`gemma-4-31b-it`, `gemma-4-e4b-it`) with a 4-bit
+  path, but its architecture only exists in `transformers>=5.5`, above the
+  current pin. Selecting it reports that rather than failing obscurely.
+- ✅ **pixai-tagger-v0.9** — newer Danbooru snapshot than WD v3 (~13.5k tags
+  against ~10.8k), better recall and newer character coverage; complements
+  wd-eva02-large-tagger-v3.
 
-### 2.2 Deprecate / demote
-Move to a "legacy" section (still runnable, not promoted): LLaVA-1.5,
-BakLLaVA, InstructBLIP, BLIP-2, Kosmos-2, Moondream 1, WD v2 taggers.
-These are 2023–2024-era quality and no longer competitive.
+  The entry points at **`deepghs/pixai-tagger-v0.9-onnx`**, not `pixai-labs`,
+  which publishes PyTorch weights with no `model.onnx`. Despite sharing
+  filenames with the WD exports this is not a WD tagger — it takes channel-
+  first RGB with ImageNet normalisation where WD takes channel-last BGR at raw
+  0–255 — so it has its own implementation rather than subclassing `WdTagger`.
+  Preprocessing is read from the export's own `preprocess.json` by
+  `utils/onnx_preprocess.py`, whose output was checked against the reference
+  implementation (see [Verification](#verification)). Per-category thresholds
+  come from the export's `thresholds.csv`, since characters want a much higher
+  bar than general tags; the *Use the model's thresholds* setting turns that
+  off in favour of a single value.
+- ✅ **JoyCaption tag-grounded mode** — the image's existing tags are wired
+  into the JoyCaption prompt behind a toggle.
+
+### 2.2 Deprecate / demote — done
+LLaVA-1.5, BakLLaVA, InstructBLIP, BLIP-2, Kosmos-2, Moondream 1 and the WD v2
+taggers sit in a `LEGACY_MODELS` group below an unselectable heading in the
+model list. Still fully runnable, just not promoted.
 
 ### 2.3 Keep front and center
 JoyCaption Beta One (watch for v1.0), Florence-2 / PromptGen (fast low-VRAM
@@ -165,55 +257,72 @@ calling `imagesize.get()` plus an `exifread` file-open per image. On a
   instant.
 
 ### 3.3 Captioning throughput
-- Keep models loaded between batch runs when settings are unchanged (avoid
-  reload per invocation).
-- Expose batch size for VLM captioners where the backend supports it.
-- Prefer `dtype=bfloat16` + FlashAttention where already installed; 4-bit
-  (bitsandbytes) already exists for JoyCaption — extend it to Qwen3-VL and
-  Gemma 4, where it's effectively required on consumer GPUs (30B-A3B ≈ 20 GB,
-  Gemma 4 31B ≈ 18–20 GB at 4-bit).
+- ~~Keep models loaded between batch runs when settings are unchanged~~ —
+  already handled by `AutoCaptioningModel.load_processor_and_model`, which
+  reuses the processor and model when the id, device and 4-bit flag match.
+  This was listed as outstanding but had never been missing.
+- ✅ Tagger batch size is a setting, clamped to the ONNX model's batch
+  dimension. True batching for the VLM captioners is still per-image plus
+  prefetch.
+- ✅ bfloat16 and the 4-bit bitsandbytes path live on the base captioning
+  model, so Qwen3-VL and Gemma 4 inherit them; both declare `bfloat16` and
+  effectively need 4-bit on consumer GPUs (30B-A3B ≈ 20 GB, Gemma 4 31B
+  ≈ 18–20 GB at 4-bit). Verify-on-hardware.
 
 ### 3.4 UI responsiveness on large datasets
-Findings from a code-level pass, ranked by impact:
 
-- **Tag counter is O(dataset) per edit** — `main_window.py:442-444` reruns
-  `count_tags()` over *all* images on every `dataChanged`, and batch
-  captioning emits `dataChanged` per image, making an M-image captioning run
-  over an N-image folder O(M·N). Make `TagCounterModel` incremental
-  (`counter.subtract(old); counter.update(new)`).
-- **Undo stack deep-copies the whole dataset per edit** —
-  `image_list_model.py:167` snapshots every image's tags (32 deep) even for a
-  single-tag change. Store per-image diffs instead.
-- **Thumbnails decode full-resolution images on the UI thread** —
-  `image_list_model.py:82-88` decodes full-size then downscales inside
-  `data()`. Use `QImageReader.setScaledSize()` (downsample during decode) and
-  move generation to a background pool.
-- **`tokens:` filter tokenizes every image per keystroke** —
-  `proxy_image_list_model.py:62-65` with no caching; also the filter
-  re-joins each image's tags multiple times per evaluation. Cache token
-  counts per image (invalidate on tag change), debounce the filter box, and
-  compute the joined caption once per image per pass.
-- **Batch operations write .txt files synchronously on the UI thread** —
-  sort/shuffle/find-replace/rename all call `write_image_tags_to_disk`
-  per image inline; some paths write even when nothing changed. Move writes
-  to a worker, skip unchanged files.
-- **Find & Replace recounts all matches on every keystroke**
-  (`find_and_replace_dialog.py:42`) — debounce with a short QTimer.
-- **Image viewer re-decodes the file from disk on every resize event**
-  (`image_viewer.py:21-24`) — cache the decoded QImage, rescale the cache;
-  reload only on path change.
-- **Captioning loop is strictly serial** (`captioning_thread.py:101-126`) —
-  the GPU idles during each image's disk load + preprocess. Prefetch the next
-  image's inputs while the current one generates (also covers 3.3 batching).
-- **Startup blocks on the CLIP tokenizer** (`main_window.py:49-50`) —
-  `AutoTokenizer.from_pretrained` runs in the constructor before first paint.
-  Load lazily or after show.
+**Landed in the first two passes:** incremental tag counter; sparse undo
+diffs; scaled thumbnail decode on a background pool; cached `tokens:` counts;
+async `.txt` writes; debounced filter and Find & Replace; image-viewer decode
+cache; captioning prefetch; lazy tokenizer load.
 
-### 3.5 Dependency refresh
-- `transformers==4.48.3` (early 2025) is too old for Qwen3-VL — bump to a
-  current 4.5x release and re-verify each existing captioner (Florence-2 is
-  the usual breakage point; pin `trust_remote_code` versions).
-- Revisit `flash-attn` wheels after the torch bump this implies.
+**Landed in the third pass:**
+- **Thumbnail memory was unbounded** — a decoded thumbnail was kept on every
+  `Image` for the lifetime of the directory, so memory tracked the dataset
+  rather than the viewport (roughly gigabytes across a 50k-image set at the
+  default width). Now a bounded LRU keyed by path.
+- **`dataChanged` spanned first-to-last changed row** — an edit touching rows
+  0 and 9999 marked ten thousand rows as changed, and the tag counter diffed
+  all of them. Now emitted as contiguous runs.
+- **Tag counting re-ranked every tag per edit** — plus a full `Counter` copy
+  via unary plus, plus a view reset that discarded the All Tags selection and
+  scroll position. Batch captioning reports one row at a time, so that was one
+  full ranking pass per image. Zero-count tags are dropped directly and
+  ranking is coalesced onto a zero-delay timer.
+- **The filter rebuilt each caption once per term** — the claim that this was
+  fixed in pass two was not true of the code. Now cached on the `Image` and
+  invalidated with the token count.
+- **The dimension cache grew forever** — entries are keyed by path, mtime and
+  size, so every edited image left its old entry behind. Pruned on save above
+  a threshold.
+- **torch loaded at startup to draw a combo box** — the roster imported every
+  model class at module import. Now imported on demand.
+
+**Still open:**
+- True batching for the VLM captioners (currently per-image plus prefetch).
+- The `original_images/` scan in `get_file_paths` walks the whole tree before
+  filtering; fine for local disks, worth revisiting for network shares.
+
+### 3.5 Dependency refresh — done, with one open decision
+
+Pinned at **`transformers==4.57.6`**, the last 4.x release and the first to
+carry `qwen3_vl` / `qwen3_vl_moe`. The 4.x line ended there in January 2026;
+the current line is 5.x.
+
+The app no longer depends on a single API shape — `transformers_compat.py`
+resolves the auto class and the dtype argument name, and gates models on a
+declared minimum version — so moving the pin is a one-line change plus a
+hardware pass, not a code migration.
+
+Open decision: **whether to pin 5.x.** For it — Gemma 4 needs `>=5.5`, and
+Florence-2 becomes natively supported. Against — Phi-3-Vision and Moondream
+still load remote code written against the 4.x API, and neither has been run
+here. Verified against the real libraries: `AutoModelForVision2Seq` is removed
+in 5.x, while `llava`, `llava_next`, `instructblip`, `blip-2`, `kosmos-2` and
+`florence2` are all natively registered.
+
+`flash-attn` wheels stay pinned to the current torch 2.8 build; revisit
+alongside any torch bump.
 
 ## 4. Quality-of-life aligned with current workflows
 
@@ -243,21 +352,27 @@ Findings from a code-level pass, ranked by impact:
   % images containing the trigger token, tag frequency (exists) — helps spot
   over/under-captioning before training.
 
-## 5. Suggested order of work
+## 5. What is left
 
-1. WD tagger GPU + batching (3.1) — small diff, immediate payoff.
-2. Parallel directory loading (3.2).
-3. Caption profiles + per-encoder token counter (1.1, 1.2).
-4. Incremental tag counter + undo diffs + thumbnail/decode fixes (3.4, top
-   entries) — biggest UI wins for large datasets.
-5. Qwen3-VL (incl. 30B-A3B) + Gemma 4 + transformers bump (2.1, 3.5) — do
-   together; both need a current transformers release.
-6. Bucket calculator (4) — self-contained, no model dependencies; can be
-   done any time.
-7. JoyCaption tag-grounding, pixai-tagger, trigger tooling, Illustrious
-   reorder (2.1, 1.3, 1.4).
-8. Remaining 3.4 items (debounces, async writes, viewer cache), legacy
-   demotion, export presets, stats panel (2.2, 4).
+Items 1–8 of the original order of work are done; the sections above record
+what landed where. What remains:
+
+1. **A hardware pass.** Load each captioner under transformers 4.57.6 on a
+   real GPU — Qwen3-VL end to end, and Florence-2 / Phi-3-Vision / Moondream,
+   which use `trust_remote_code`. Nothing else on this list should move until
+   the current pin is known-good.
+2. **Decide on transformers 5.x** (3.5). Gemma 4 needs it; Phi-3-Vision and
+   Moondream are the risk. The compat layer means this is a pin change plus
+   verification, not a migration.
+3. **Tag one image with pixai-tagger.** Everything but the weights is tested;
+   what remains is confirming the real `preprocess.json` needs no stage beyond
+   the eight implemented, and that the tags come out sensible.
+4. **Trigger consistency as a filter term** (1.3) and the optional
+   quality/rating tag toggle (1.4).
+5. **True VLM batching** (3.3) — the tagger batches; the VLM path prefetches
+   but still generates one image at a time.
+6. `bucket:WxH` as a filter term (4) — the calculator reports the
+   distribution, but buckets are not filterable from the image list.
 
 ---
 

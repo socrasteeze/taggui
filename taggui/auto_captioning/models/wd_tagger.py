@@ -1,52 +1,19 @@
 # Based on
 # https://huggingface.co/spaces/SmilingWolf/wd-tagger/blob/main/app.py.
 import csv
-import re
 from datetime import datetime
 from pathlib import Path
 
 import huggingface_hub
 import numpy as np
-import onnxruntime
 from PIL import Image as PilImage
 from onnxruntime import InferenceSession
 
 import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
+from auto_captioning.tag_utils import (KAOMOJIS, get_onnx_providers,
+                                       get_tags_to_exclude)
 from utils.image import Image
-
-KAOMOJIS = ['0_0', '(o)_(o)', '+_+', '+_-', '._.', '<o>_<o>', '<|>_<|>', '=_=',
-            '>_<', '3_3', '6_9', '>_o', '@_@', '^_^', 'o_o', 'u_u', 'x_x',
-            '|_|', '||_||']
-
-
-def get_onnx_providers(use_gpu: bool, gpu_index: int = 0) -> list:
-    """
-    Build the ONNX Runtime execution provider list, preferring GPU providers
-    when the user selected the GPU and the corresponding provider is actually
-    installed (e.g. onnxruntime-gpu or onnxruntime-directml). Falls back to CPU
-    otherwise, so this is safe even with the CPU-only onnxruntime package.
-    """
-    available = onnxruntime.get_available_providers()
-    providers = []
-    if use_gpu:
-        if 'CUDAExecutionProvider' in available:
-            providers.append(('CUDAExecutionProvider',
-                              {'device_id': gpu_index}))
-        elif 'DmlExecutionProvider' in available:
-            providers.append(('DmlExecutionProvider',
-                              {'device_id': gpu_index}))
-    providers.append('CPUExecutionProvider')
-    return providers
-
-
-def get_tags_to_exclude(tags_to_exclude_string: str) -> list[str]:
-    if not tags_to_exclude_string.strip():
-        return []
-    tags = re.split(r'(?<!\\),', tags_to_exclude_string)
-    tags = [tag.strip().replace(r'\,', ',') for tag in tags]
-    return tags
-
 
 class WdTaggerModel:
     def __init__(self, model_id: str, providers: list | None = None):
@@ -220,10 +187,3 @@ class WdTagger(AutoCaptioningModel):
             console_output_caption = caption
         return caption, console_output_caption
 
-    def get_character_and_series_tags(self) -> tuple[set[str], set[str]]:
-        """Expose WD category sets for Illustrious reorder."""
-        characters = {self.model.tags[i]
-                      for i in self.model.character_tags_indices}
-        # WD does not separate series; treat copyright-like unused. Return empty
-        # series set; character tags alone still help Illustrious ordering.
-        return characters, set()

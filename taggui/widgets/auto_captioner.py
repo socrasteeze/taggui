@@ -8,9 +8,10 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QPlainTextEdit, QProgressBar, QScrollArea,
                                QVBoxLayout, QWidget)
 
-from auto_captioning.captioning_thread import CaptioningThread
-from auto_captioning.models.wd_tagger import WdTagger
-from auto_captioning.models_list import MODELS, get_model_class
+from auto_captioning.captioning_thread import (WD_DEFAULT_BATCH_SIZE,
+                                               CaptioningThread)
+from auto_captioning.models_list import (MODELS, is_group_separator,
+                                         is_tagger_model_id)
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
 from models.image_list_model import ImageListModel
 from utils.big_widgets import TallPushButton
@@ -67,6 +68,7 @@ class CaptionSettingsForm(QVBoxLayout):
         self.model_combo_box.setEditable(True)
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
+        self._disable_group_separators()
         self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
         set_text_edit_height(self.prompt_text_edit, 4)
         self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
@@ -136,6 +138,21 @@ class CaptionSettingsForm(QVBoxLayout):
         self.min_probability_spin_box.setSingleStep(0.01)
         self.max_tags_spin_box = FocusedScrollSettingsSpinBox(
             key='wd_tagger_max_tags', default=30, minimum=1, maximum=999)
+        self.batch_size_spin_box = FocusedScrollSettingsSpinBox(
+            key='wd_tagger_batch_size', default=WD_DEFAULT_BATCH_SIZE,
+            minimum=1, maximum=64)
+        self.batch_size_spin_box.setToolTip(
+            'Images sent to the tagger per inference call. Larger batches are '
+            'faster but use more memory. Reduced automatically if the model '
+            'only accepts one image at a time.')
+        self.use_model_thresholds_check_box = SettingsBigCheckBox(
+            key='tagger_use_model_thresholds', default=True)
+        self.use_model_thresholds_check_box.setToolTip(
+            "Use the per-category thresholds the model ships with, where it "
+            "has them. Character tags need a much higher bar than general "
+            "ones, so a single value across every category is a poor fit. "
+            "Turn this off to apply `Minimum probability` to every category "
+            "instead.")
         tags_to_exclude_form = QFormLayout()
         tags_to_exclude_form.setRowWrapPolicy(
             QFormLayout.RowWrapPolicy.WrapAllRows)
@@ -151,6 +168,9 @@ class CaptionSettingsForm(QVBoxLayout):
         wd_tagger_settings_form.addRow('Minimum probability',
                                        self.min_probability_spin_box)
         wd_tagger_settings_form.addRow('Maximum tags', self.max_tags_spin_box)
+        wd_tagger_settings_form.addRow('Batch size', self.batch_size_spin_box)
+        wd_tagger_settings_form.addRow(
+            "Use the model's thresholds", self.use_model_thresholds_check_box)
         wd_tagger_settings_form.addRow(tags_to_exclude_form)
 
         self.toggle_advanced_settings_form_button = TallPushButton(
@@ -273,6 +293,19 @@ class CaptionSettingsForm(QVBoxLayout):
               f'{pluralize("path", len(model_directory_paths))}.')
         return model_directory_paths
 
+    def _disable_group_separators(self):
+        """Render the roster's group labels as unselectable headings."""
+        model = self.model_combo_box.model()
+        if not hasattr(model, 'item'):
+            return
+        for row in range(self.model_combo_box.count()):
+            if not is_group_separator(self.model_combo_box.itemText(row)):
+                continue
+            item = model.item(row)
+            if item is not None:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable
+                              & ~Qt.ItemFlag.ItemIsEnabled)
+
     @Slot(str)
     def show_settings_for_model(self, model_id: str):
         wd_tagger_widgets = [self.wd_tagger_settings_form_container]
@@ -290,7 +323,7 @@ class CaptionSettingsForm(QVBoxLayout):
             self.toggle_advanced_settings_form_button,
             self.advanced_settings_form_container
         ]
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
+        is_wd_tagger_model = is_tagger_model_id(model_id)
         for widget in wd_tagger_widgets:
             widget.setVisible(is_wd_tagger_model)
         for widget in non_wd_tagger_widgets:
@@ -303,7 +336,7 @@ class CaptionSettingsForm(QVBoxLayout):
     @Slot(str)
     def set_load_in_4_bit_visibility(self, device: str):
         model_id = self.model_combo_box.currentText()
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
+        is_wd_tagger_model = is_tagger_model_id(model_id)
         if is_wd_tagger_model:
             self.load_in_4_bit_container.setVisible(False)
             return
@@ -353,6 +386,9 @@ class CaptionSettingsForm(QVBoxLayout):
                     self.show_probabilities_check_box.isChecked(),
                 'min_probability': self.min_probability_spin_box.value(),
                 'max_tags': self.max_tags_spin_box.value(),
+                'batch_size': self.batch_size_spin_box.value(),
+                'use_model_thresholds':
+                    self.use_model_thresholds_check_box.isChecked(),
                 'tags_to_exclude':
                     self.tags_to_exclude_text_edit.toPlainText()
             },

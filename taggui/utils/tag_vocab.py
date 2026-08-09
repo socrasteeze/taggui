@@ -115,16 +115,39 @@ class TagVocab:
     def resolve(self, text: str) -> str:
         return self.alias_to_canonical.get(text.casefold(), text)
 
+    def get_names_in_categories(self, categories: set[int]) -> set[str]:
+        """
+        Every tag name (and alias) belonging to the given Danbooru categories:
+        0 general, 1 artist, 3 copyright/series, 4 character. Names are
+        casefolded because dataset tags are not consistently cased.
+        """
+        names = set()
+        for tag in self.tags:
+            if tag.category not in categories:
+                continue
+            names.add(tag.name.casefold())
+            names.update(alias.casefold() for alias in tag.aliases)
+        return names
+
     def suggest(self, prefix: str, limit: int = 50) -> list[VocabTag]:
         if not prefix:
             return []
         key = prefix.casefold()
-        bucket_key = key[:2] if len(key) >= 2 else key
-        candidates = self._prefix_index.get(bucket_key, [])
-        # Also check single-char bucket when prefix grows past 1 char.
         if len(key) >= 2:
+            # Terms of two or more characters live in a two-character bucket;
+            # one-character terms have their own bucket.
             candidates = list(dict.fromkeys(
-                candidates + self._prefix_index.get(key[:1], [])))
+                self._prefix_index.get(key[:2], [])
+                + self._prefix_index.get(key[:1], [])))
+        else:
+            # A one-character prefix has to span every bucket starting with
+            # that character, otherwise nothing matches until the user types a
+            # second one. The bucket keyspace is small, so this stays cheap.
+            candidates = list(dict.fromkeys(
+                index
+                for bucket_key, indices in self._prefix_index.items()
+                if bucket_key.startswith(key)
+                for index in indices))
         matches: list[VocabTag] = []
         seen: set[str] = set()
         for index in candidates:

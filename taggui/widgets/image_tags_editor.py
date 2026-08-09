@@ -1,10 +1,13 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
                             QTimer, Qt, Signal, Slot)
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (QAbstractItemView, QCompleter, QDockWidget,
                                QLabel, QLineEdit, QListView, QMessageBox,
                                QVBoxLayout, QWidget)
-from transformers import PreTrainedTokenizerBase
 
 from models.proxy_image_list_model import ProxyImageListModel
 from models.tag_counter_model import TagCounterModel
@@ -13,8 +16,13 @@ from utils.image import Image
 from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.tag_vocab import MergedTagCompleterModel, TagVocab
 from utils.text_edit_item_delegate import TextEditItemDelegate
+from utils.token_counting import count_caption_tokens
 from utils.utils import get_confirmation_dialog_reply
 from widgets.image_list import ImageList
+
+if TYPE_CHECKING:
+    # Type annotations only; see the note in `proxy_image_list_model.py`.
+    from transformers import PreTrainedTokenizerBase
 
 
 class TagInputBox(QLineEdit):
@@ -160,6 +168,9 @@ class ImageTagsEditor(QDockWidget):
         self.vocab = vocab or TagVocab()
         self.image_index = None
         self.token_limit = 75
+        # False when a stand-in tokenizer is counting for the profile's real
+        # encoder, so the label can say the number is approximate.
+        self.is_token_count_exact = True
 
         self.setObjectName('image_tags_editor')
         self.setWindowTitle('Image Tags')
@@ -197,26 +208,28 @@ class ImageTagsEditor(QDockWidget):
         self.token_limit = profile.token_limit
         self.count_tokens()
 
-    def set_tokenizer(self, tokenizer: PreTrainedTokenizerBase | None):
+    def set_tokenizer(self, tokenizer: PreTrainedTokenizerBase | None,
+                      is_exact: bool = True):
         self.tokenizer = tokenizer
+        self.is_token_count_exact = is_exact
         self.count_tokens()
 
     @Slot()
     def count_tokens(self):
         caption = self.tag_separator.join(
             self.image_tag_list_model.stringList())
-        if self.tokenizer is not None:
-            caption_token_count = len(self.tokenizer(caption).input_ids)
-            if caption_token_count >= 2:
-                caption_token_count -= 2
-        else:
-            caption_token_count = len(caption.split()) if caption else 0
+        caption_token_count = count_caption_tokens(caption, self.tokenizer)
         if caption_token_count > self.token_limit:
             self.token_count_label.setStyleSheet('color: red;')
         else:
             self.token_count_label.setStyleSheet('')
+        approximate = '' if self.is_token_count_exact else '~'
         self.token_count_label.setText(
-            f'{caption_token_count} / {self.token_limit} Tokens')
+            f'{approximate}{caption_token_count} / {self.token_limit} Tokens')
+        self.token_count_label.setToolTip(
+            '' if self.is_token_count_exact else
+            "Approximate: this profile's tokenizer is not downloaded yet "
+            '(Tools > Download Token Counter).')
 
     @Slot()
     def select_first_tag(self):

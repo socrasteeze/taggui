@@ -5,16 +5,18 @@ imagesize==1.4.1
 pillow==11.3.0
 pyparsing==3.2.5
 PySide6==6.10.0
-transformers==4.48.3
+# 4.57.x is the last of the 4.x line and the first to support Qwen3-VL and
+# Gemma 4. Newer 5.x releases also work - the app adapts to either API shape -
+# but the older `trust_remote_code` captioners (Florence-2, Phi-3-Vision,
+# Moondream 1, InstructBLIP, BLIP-2, Kosmos-2) are only tested against this.
+transformers==4.57.6
 
 # Florence-2
 timm==1.0.20
 
 # WD Tagger
 huggingface-hub==0.35.3
-# CPU package by default. For GPU WD tagging, uninstall this and install
-# onnxruntime-gpu (CUDA) or onnxruntime-directml (Windows) instead; the app
-# auto-selects CUDA/DirectML providers when available.
+# CPU package by default; see the README for enabling GPU tagging.
 onnxruntime==1.23.1
 
 # PyTorch

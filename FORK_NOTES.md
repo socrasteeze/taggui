@@ -37,8 +37,41 @@ actually landed and where.
   sparse-bucket warnings, plus the optional **Process Images into Buckets**
   action (moves originals to `original_images/`, writes resized+cropped PNGs
   in place, carries `.txt` captions along).
-- `taggui/utils/dimension_cache.py` — disk cache of image dimensions.
+- `taggui/utils/dimension_cache.py` — disk cache of image dimensions, pruned
+  on save so it does not grow for the life of the install.
 - `taggui/utils/tag_writer.py` — background queue for `.txt` sidecar writes.
+  A `QObject`; reports failures through `errors_occurred` once the queue
+  drains, so a failing batch is one dialog naming the files that failed.
+- `taggui/utils/thumbnail_cache.py` — bounded LRU of decoded thumbnails, so
+  memory tracks the viewport rather than the dataset.
+- `taggui/utils/token_counting.py` — caption token counting; derives each
+  tokenizer's special-token overhead instead of assuming CLIP's two.
+- `taggui/utils/tokenizers.py` — per-profile tokenizers (CLIP bundled, T5 and
+  Qwen3 downloaded into the app data directory), and the honest-fallback
+  result type behind the `~n / limit` display.
+- `taggui/auto_captioning/transformers_compat.py` — adapts to the installed
+  transformers release: image-text auto class, dtype argument name, and the
+  per-model minimum-version gate. **Read this first when bumping
+  `transformers`.**
+- `taggui/auto_captioning/models/gemma_4.py` — Gemma 4 captioner
+  (needs `transformers>=5.5`, above the current pin).
+- `taggui/auto_captioning/models/pixai_tagger.py` — the pixai-tagger
+  captioning-model wrapper.
+- `taggui/auto_captioning/models/pixai_tagger_model.py` — its ONNX inference,
+  split out because none of it needs torch, which keeps it testable in CI.
+- `taggui/auto_captioning/tag_utils.py` — `KAOMOJIS`, `get_onnx_providers`
+  and `get_tags_to_exclude`, shared by both taggers. They used to live in
+  `wd_tagger.py`, which cannot be imported without torch.
+- `taggui/utils/onnx_preprocess.py` — interpreter for the `preprocess.json`
+  that deepghs ONNX exports ship. **A mistake here yields wrong tags rather
+  than an error**, so it is pinned against the reference implementation by
+  `tools/differential_preprocess_check.py`.
+- `tools/differential_preprocess_check.py` — that check. Not part of the
+  pytest suite: it needs `dghs-imgutils`, whose dependency tree is larger than
+  taggui's own. Run it in a throwaway environment after touching
+  `onnx_preprocess.py`.
+- `tests/`, `pytest.ini`, `requirements-dev.txt`,
+  `.github/workflows/tests.yml` — headless test suite and CI.
 - `taggui/utils/caption_profiles.py` — SDXL / Illustrious / FLUX caption profiles.
 - `taggui/utils/tag_vocab.py` — a1111-format CSV vocab loader + merged completer.
 - `taggui/utils/create_shortcut.py` — Windows `.lnk` helper (WScript.Shell).
@@ -56,32 +89,50 @@ actually landed and where.
   async directory load progress; debounced filter; lazy tokenizer load;
   vocab wiring.
 - `taggui/models/image_list_model.py` — async directory load worker, dimension
-  cache, background thumbnails, sparse undo diffs, async tag writes, trigger
-  insert, Illustrious reorder, JSONL / Kohya metadata export;
+  cache, background thumbnails via `ThumbnailCache`, sparse undo diffs, async
+  tag writes with `write_errors_occurred`, trigger insert, Illustrious
+  reorder, JSONL / Kohya metadata export, `emit_data_changed_for_rows`;
   `original_images/` exclusion.
-- `taggui/models/proxy_image_list_model.py` — cached `tokens:` filter counts;
-  optional lazy tokenizer.
+- `taggui/models/proxy_image_list_model.py` — cached `tokens:` filter counts
+  and cached joined captions; re-filters when the tokenizer arrives;
+  `transformers` import is type-only.
 - `taggui/models/tag_counter_model.py` — incremental tag counting; `tags`
-  property for vocab completer; `beginResetModel` / `endResetModel` pairing.
+  property for vocab completer; correct `beginResetModel` ordering; ranking
+  coalesced onto a zero-delay timer (`publish_pending_counts`).
 - `README.md` — fork banner, Windows `run.bat` install notes, links to
   `FORK_CHANGELOG.md`.
-- `taggui/widgets/image_tags_editor.py` — profile token limits; merged
-  dataset+CSV autocomplete.
+- `taggui/widgets/image_tags_editor.py` — profile token limits and the
+  approximate-count marker; merged dataset+CSV autocomplete; `transformers`
+  import is type-only.
 - `taggui/widgets/image_viewer.py` — decoded-image cache on resize.
 - `taggui/widgets/image_list.py` — list/grid view mode.
-- `taggui/widgets/auto_captioner.py` — JoyCaption tag-grounding toggle.
+- `taggui/widgets/auto_captioner.py` — JoyCaption tag-grounding toggle;
+  tagger batch size; unselectable roster headings. Routes by model id rather
+  than importing model classes, keeping torch out of startup.
 - `taggui/dialogs/settings_dialog.py` — caption profile + autocomplete mode.
 - `taggui/dialogs/find_and_replace_dialog.py` — debounced match counts.
 - `taggui/dialogs/batch_reorder_tags_dialog.py` — move tags to back;
-  Illustrious order button.
-- `taggui/auto_captioning/captioning_thread.py` — prefetch + WD batching.
-- `taggui/auto_captioning/models/wd_tagger.py` — ONNX GPU providers + batch
-  generate.
+  Illustrious order button, which emits `reorder_illustrious_requested` so the
+  window can supply the vocabulary categories.
+- `taggui/auto_captioning/captioning_thread.py` — prefetch, tagger batching
+  with a configurable size, and the group-heading guard.
+- `taggui/auto_captioning/auto_captioning_model.py` — lazily resolved auto
+  class, compat dtype argument, `minimum_transformers_version` gate.
+- `taggui/auto_captioning/models/wd_tagger.py` — batch generate; the ONNX
+  provider and tag helpers moved to `tag_utils.py`.
 - `taggui/auto_captioning/models/joycaption.py` — tag-grounded prompts.
-- `taggui/auto_captioning/models_list.py` — Qwen3-VL models; roster reorder.
+- `taggui/auto_captioning/models/qwen3_vl.py` — declares its minimum
+  transformers version.
+- `taggui/auto_captioning/models_list.py` — `RECOMMENDED_MODELS` /
+  `LEGACY_MODELS` groups; routing is data (`get_model_class_location`) with
+  classes imported on demand.
 - `taggui/utils/settings.py` — new defaults (profile, autocomplete mode, etc.).
-- `taggui/utils/image.py` — `token_count` cache field.
-- `requirements.txt` — note on optional `onnxruntime-gpu` / DirectML.
+- `taggui/utils/image.py` — `token_count` / `caption` caches and
+  `invalidate_caches()`; the thumbnail moved to `ThumbnailCache`.
+- `taggui/utils/tag_vocab.py` — `get_names_in_categories()` for the
+  Illustrious reorder; one-character prefix suggestions.
+- `requirements.txt` — `transformers==4.57.6`.
+- `README.md` — GPU tagging, captioner version requirements, running tests.
 
 ## Behavioural notes for merges
 
@@ -97,6 +148,25 @@ actually landed and where.
   selecting rows (main_window handles this).
 - Undo history items are sparse `{index: previous_tags}` dicts, not full
   dataset snapshots.
+- Anything that mutates `image.tags` must call `image.invalidate_caches()`;
+  the token count and joined caption both derive from them. The four existing
+  mutation paths all funnel through `_commit_changes`, `restore_history_tags`,
+  `update_image_tags` or `add_tags`.
+- `TagCounterModel` publishes its ranking on a zero-delay timer. The counts
+  are correct immediately; `most_common_tags` catches up when the event loop
+  runs, or on `publish_pending_counts()`. Tests call it explicitly.
+- Model classes are imported on demand. Import `models_list` freely - it does
+  not pull in torch - but `get_model_class()` does.
+- The batched tagger route is selected by `is_tagger_model_id`, not by
+  `isinstance(model, WdTagger)`. A new tagger must be added to
+  `TAGGER_CLASS_NAMES` or it silently drops to one image at a time.
+- pixai-tagger and the WD taggers share filenames but not preprocessing: RGB
+  channel-first with ImageNet normalisation against BGR channel-last at raw
+  0-255. Do not merge their image paths.
+- Bumping `transformers` is a `requirements.txt` change plus a hardware pass;
+  the code adapts through `transformers_compat.py`. Note
+  `AutoModelForVision2Seq` does not exist in 5.x, and Gemma 4 does not exist
+  below 5.5.
 
 ## Merge routine
 
@@ -104,7 +174,8 @@ actually landed and where.
 git remote add upstream https://github.com/jhc13/taggui   # once
 git fetch upstream && git merge upstream/main
 # expected conflict surface: the edited upstream files above.
-# Re-run the app afterwards:
+# Then, in order:
+#   pytest             (headless; catches most merge damage in seconds)
 #   run.bat            (Windows)
 #   python taggui/run_gui.py
 # and sanity-check: directory load (progress dialog), tag editing, WD tagger

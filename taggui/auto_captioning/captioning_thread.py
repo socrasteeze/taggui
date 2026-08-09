@@ -12,7 +12,26 @@ from utils.enums import CaptionPosition
 from utils.image import Image
 from utils.settings import get_tag_separator
 
-WD_BATCH_SIZE = 8
+WD_DEFAULT_BATCH_SIZE = 8
+
+
+def get_wd_batch_size(model, caption_settings: dict) -> int:
+    """
+    Images per inference call, clamped to what the model accepts. ONNX exports
+    with a fixed batch dimension of 1 reject batched input, so honour that
+    rather than failing at run time.
+    """
+    batch_size = caption_settings.get('wd_tagger_settings', {}).get(
+        'batch_size', WD_DEFAULT_BATCH_SIZE)
+    batch_size = max(1, int(batch_size))
+    try:
+        model_batch_dimension = (model.model.inference_session.get_inputs()[0]
+                                 .shape[0])
+    except Exception:
+        return batch_size
+    if isinstance(model_batch_dimension, int) and model_batch_dimension > 0:
+        return min(batch_size, model_batch_dimension)
+    return batch_size
 
 
 def add_caption_to_tags(tags: list[str], caption: str,
@@ -81,10 +100,16 @@ class CaptioningThread(QThread):
     def run_captioning(self):
         # Lazy imports avoid circular import with auto_captioning_model /
         # models_list during module initialization.
-        from auto_captioning.models_list import get_model_class
-        from auto_captioning.models.wd_tagger import WdTagger
+        from auto_captioning.models_list import (get_model_class,
+                                                 is_group_separator,
+                                                 is_tagger_model_id)
 
         model_id = self.caption_settings['model_id']
+        if not model_id or is_group_separator(model_id):
+            self.is_error = True
+            self.clear_console_text_edit_requested.emit()
+            print('Select a model to caption with.')
+            return
         model_class = get_model_class(model_id)
         model = model_class(
             captioning_thread_=self, caption_settings=self.caption_settings)
@@ -108,7 +133,7 @@ class CaptioningThread(QThread):
         print(captioning_message)
         caption_position = self.caption_settings['caption_position']
 
-        if isinstance(model, WdTagger) and selected_image_count > 1:
+        if is_tagger_model_id(model_id) and selected_image_count > 1:
             self._run_wd_batched(model, caption_position,
                                  are_multiple_images_selected,
                                  captioning_start_datetime)
@@ -176,12 +201,13 @@ class CaptioningThread(QThread):
                         captioning_start_datetime):
         selected_image_count = len(self.selected_image_indices)
         processed = 0
-        for batch_start in range(0, selected_image_count, WD_BATCH_SIZE):
+        batch_size = get_wd_batch_size(model, self.caption_settings)
+        for batch_start in range(0, selected_image_count, batch_size):
             if self.is_canceled:
                 print('Canceled captioning.')
                 return
             batch_indices = self.selected_image_indices[
-                batch_start:batch_start + WD_BATCH_SIZE]
+                batch_start:batch_start + batch_size]
             prepared = []
             for image_index in batch_indices:
                 image: Image = self.image_list_model.data(

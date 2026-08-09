@@ -41,6 +41,53 @@ models.
 Later launches skip pip when `venv\installed-requirements.txt` still matches
 `requirements.txt`. Use `run.bat update` to force a reinstall.
 
+### GPU tagging with the WD taggers (optional)
+
+The WD taggers run through ONNX Runtime, and `requirements.txt` pins the CPU
+package so the install works everywhere. Batch-tagging thousands of images is
+much faster on the GPU — to enable it, replace the CPU package with the one
+matching your hardware:
+
+```
+venv\Scripts\pip uninstall -y onnxruntime
+venv\Scripts\pip install onnxruntime-gpu        # NVIDIA / CUDA
+venv\Scripts\pip install onnxruntime-directml   # Windows without CUDA
+```
+
+The app picks the CUDA or DirectML provider automatically when one is
+installed and the device is set to GPU, and falls back to CPU otherwise, so
+nothing else needs changing.
+
+### Captioner model requirements
+
+Newer captioners need newer `transformers`, and the app checks before loading:
+a model that needs a newer release says so, naming the version, instead of
+failing with an unrecognised-architecture error.
+
+| Captioner | Needs |
+|---|---|
+| Qwen3-VL (2B / 4B / 8B / 30B-A3B) | `transformers>=4.57` — the pinned version |
+| Gemma 4 | `transformers>=5.5` — **not** the pinned version, see below |
+| WD taggers, pixai-tagger | ONNX Runtime only — `transformers` is not involved |
+| Everything else | the pinned version |
+
+`requirements.txt` pins 4.57.6, the last of the 4.x line. To use Gemma 4,
+raise that pin to a 5.x release and re-run `run.bat update`. The app works on
+either — it adapts to both API shapes — but the tradeoff is worth knowing:
+on 5.x, Florence-2 gains native support (no `trust_remote_code`), while
+Phi-3-Vision and Moondream still rely on remote code written against the 4.x
+API and are the two to re-check.
+
+### Development
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite runs headless and needs neither a GPU nor the captioning
+dependencies. Model loading itself is verified on real hardware.
+
 ### Upstream releases / manual install
 
 The easiest way to use the **upstream** application is to download the latest

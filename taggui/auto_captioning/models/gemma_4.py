@@ -1,4 +1,13 @@
-"""Qwen3-VL captioning support."""
+"""
+Gemma 4 captioning support.
+
+Gemma 4 is a dense open-weights VLM. All of its parameters are active, unlike
+Qwen3-VL-30B-A3B, so the larger variant wants 4-bit on consumer GPUs; the
+existing quantization path covers that. Its architecture is only registered in
+transformers 5.5 and later, which is newer than the pinned version, so the
+version gate reports what to update rather than letting the load fail with an
+unrecognised `model_type`.
+"""
 from datetime import datetime
 
 import torch
@@ -6,17 +15,15 @@ from transformers import AutoProcessor
 
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.transformers_compat import \
-    QWEN3_VL_MINIMUM_TRANSFORMERS_VERSION
+    GEMMA_4_MINIMUM_TRANSFORMERS_VERSION
 from utils.image import Image
 
 
-class Qwen3Vl(AutoCaptioningModel):
+class Gemma4(AutoCaptioningModel):
     dtype = torch.bfloat16
     use_safetensors = True
-    # Qwen3-VL is not an architecture older releases know about; without this
-    # the load fails with an unrecognised `model_type`.
-    minimum_transformers_version = QWEN3_VL_MINIMUM_TRANSFORMERS_VERSION
-    model_display_name = 'Qwen3-VL'
+    minimum_transformers_version = GEMMA_4_MINIMUM_TRANSFORMERS_VERSION
+    model_display_name = 'Gemma 4'
 
     def get_processor(self):
         return AutoProcessor.from_pretrained(self.model_id,
@@ -27,7 +34,6 @@ class Qwen3Vl(AutoCaptioningModel):
         return 'Describe this image in detail.'
 
     def format_prompt(self, prompt: str) -> str:
-        # Prefer chat template when available.
         if (self.processor is not None
                 and hasattr(self.processor, 'apply_chat_template')):
             messages = [{
@@ -57,6 +63,6 @@ class Qwen3Vl(AutoCaptioningModel):
         if are_multiple_images_selected:
             start = self.get_captioning_start_datetime_string(
                 captioning_start_datetime)
-            return (f'Captioning with Qwen3-VL... (device: {self.device}, '
+            return (f'Captioning with Gemma 4... (device: {self.device}, '
                     f'start time: {start})')
-        return f'Captioning with Qwen3-VL... (device: {self.device})'
+        return f'Captioning with Gemma 4... (device: {self.device})'

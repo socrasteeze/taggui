@@ -1,0 +1,21 @@
+# Test-only dependencies. Deliberately excludes torch: the suite covers the
+# pure-logic, Qt-model and tagger layers, which run headless in seconds.
+# Loading model weights is verified on hardware, not in CI.
+pytest==8.4.2
+
+# Runtime dependencies the tested modules actually import.
+ExifRead==3.5.1
+imagesize==1.4.1
+pillow==11.3.0
+pyparsing==3.2.5
+PySide6==6.10.0
+
+# Pulled in for the tokenizer and window smoke tests. Without torch this
+# installs only the tokenizer and configuration side of the library, which is
+# all the token counter needs - and it means CI checks that the app starts
+# against the pinned version.
+transformers==4.57.6
+
+# The taggers run on ONNX Runtime rather than torch, so the CPU wheel (~54 MB)
+# is enough to exercise the tagger code paths with a faked session.
+onnxruntime==1.23.1
