@@ -18,9 +18,11 @@ models.
 - Keyboard-friendly interface for fast tagging
 - Tag autocomplete based on your own most-used tags (optional Danbooru/e621
   CSV vocab type-ahead in this fork)
-- Integrated token counter (CLIP / profile-aware limits in this fork)
-- Automatic caption and tag generation (includes Qwen3-VL and JoyCaption
-  tag-grounding in this fork)
+- Integrated token counter (profile-aware limits in this fork, with the real
+  CLIP / T5 / Qwen3 tokenizer per profile — see
+  [Captioner model requirements](#captioner-model-requirements))
+- Automatic caption and tag generation (includes Qwen3-VL, Gemma 4,
+  pixai-tagger, and JoyCaption tag-grounding in this fork)
 - Batch tag operations for renaming, deleting, and sorting tags
 - Advanced image list filtering
 - **This fork also adds:** async directory load, grid view, caption profiles,
@@ -77,6 +79,13 @@ either — it adapts to both API shapes — but the tradeoff is worth knowing:
 on 5.x, Florence-2 gains native support (no `trust_remote_code`), while
 Phi-3-Vision and Moondream still rely on remote code written against the 4.x
 API and are the two to re-check.
+
+The token counter shown in the Image Tags pane follows the same idea: each
+caption profile counts against its actual encoder — CLIP for SDXL/Illustrious,
+T5 for FLUX.1/Krea, Qwen3 for FLUX.2 Klein — rather than always using CLIP.
+The non-CLIP tokenizers are downloaded on first use via **Tools → Download
+Token Counter**; until one is downloaded, the count is shown as `~n / limit`
+to mark it as an estimate rather than presenting a CLIP count as exact.
 
 ### Development
 
@@ -173,8 +182,18 @@ generate captions that contain the word `cat` and either `orange`, `white`,
 or `black`.
 It is not guaranteed that all of your specifications will be met.
 
-`Tags to exclude` (WD Tagger models): Tags that should not be generated,
-separated by commas.
+The WD Tagger and pixai-tagger models share a separate settings panel:
+
+`Tags to exclude`: Tags that should not be generated, separated by commas.
+
+`Batch size` (this fork): Images sent to the tagger per inference call.
+Larger batches are faster but use more memory; reduced automatically if the
+selected model only accepts one image at a time.
+
+`Use the model's thresholds` (this fork, pixai-tagger): Applies the
+per-category confidence thresholds the model ships with — character tags
+need a much higher bar than general tags — instead of the single `Minimum
+probability` value.
 
 Many of the other generation parameters are described in the
 [Hugging Face documentation](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationConfig).
